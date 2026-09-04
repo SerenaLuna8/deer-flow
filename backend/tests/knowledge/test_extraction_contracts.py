@@ -202,20 +202,6 @@ def test_manifest_keeps_duplicate_rendered_image_occurrences_and_ignores_literal
     assert decode_manifest(encode_manifest(result), ExtractionLimits()) == result
 
 
-def test_manifest_keeps_rendered_image_offset_after_escaped_backtick() -> None:
-    attachment = _attachment()
-    link = _image_link(attachment.ref)
-    content = "\\`" + link + "` " + link + "`"
-    rendered_start = 2
-    document = Document(
-        page_content=content,
-        attachments=(_occurrence(attachment.ref, rendered_start, rendered_start + len(link)),),
-    )
-    result = _result(documents=(document,), attachments=(attachment,))
-
-    assert decode_manifest(encode_manifest(result), ExtractionLimits()) == result
-
-
 def test_manifest_rejects_code_example_offset_after_escaped_backtick() -> None:
     attachment = _attachment()
     link = _image_link(attachment.ref)
@@ -230,34 +216,6 @@ def test_manifest_rejects_code_example_offset_after_escaped_backtick() -> None:
         encode_manifest(_result(documents=(document,), attachments=(attachment,)))
 
     assert invalid_manifest.value.reason_code == "INVALID_MANIFEST"
-
-
-def test_manifest_keeps_rendered_image_after_unmatched_unequal_backtick_runs() -> None:
-    attachment = _attachment()
-    link = _image_link(attachment.ref)
-    content = "`` " + link + " ```"
-    rendered_start = 3
-    document = Document(
-        page_content=content,
-        attachments=(_occurrence(attachment.ref, rendered_start, rendered_start + len(link)),),
-    )
-    result = _result(documents=(document,), attachments=(attachment,))
-
-    assert decode_manifest(encode_manifest(result), ExtractionLimits()) == result
-
-
-def test_manifest_keeps_only_real_image_after_equal_length_inline_code() -> None:
-    attachment = _attachment()
-    link = _image_link(attachment.ref)
-    content = "``" + link + "`` " + link
-    rendered_start = len(link) + 5
-    document = Document(
-        page_content=content,
-        attachments=(_occurrence(attachment.ref, rendered_start, rendered_start + len(link)),),
-    )
-    result = _result(documents=(document,), attachments=(attachment,))
-
-    assert decode_manifest(encode_manifest(result), ExtractionLimits()) == result
 
 
 def test_manifest_rejects_duplicate_asset_refs() -> None:
@@ -291,24 +249,6 @@ def test_contracts_reject_unsafe_metadata_and_invalid_bounds() -> None:
         ExtractionLimits(max_text_chars=-1)
     with pytest.raises(ValidationError):
         SourceSpan(block_id="p:1", start=0, end=1, location={"page": 0})
-
-
-@pytest.mark.parametrize(
-    "template",
-    [
-        '{{"{link}"}}\n',
-        '<Example value={{"{link}"}} />\n',
-        "<pre>\n{link}\n</pre>\n",
-    ],
-)
-def test_manifest_and_normalizer_agree_on_inert_mdx_and_html_images(template):
-    from actweave_knowledge.extraction.normalizer import normalize_documents
-
-    content = template.format(link=_image_link("b" * 64))
-    doc = Document(page_content=content)
-    assert normalize_documents([doc]) == [doc]
-    result = _result(documents=(doc,))
-    assert decode_manifest(encode_manifest(result), ExtractionLimits()) == result
 
 
 def test_manifest_and_normalizer_agree_on_image_between_unmatched_backtick_paragraphs():

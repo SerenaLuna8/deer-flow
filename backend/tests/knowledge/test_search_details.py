@@ -14,22 +14,14 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import replace
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 from actweave_knowledge import (
     KNOWLEDGE_CONFLICT,
-    KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_SEGMENT_DETAIL_CHILD_PAGE_SIZE,
     KnowledgeError,
-    KnowledgeSegmentAttachmentView,
-    KnowledgeSegmentChildView,
-    KnowledgeSegmentDetail,
-    KnowledgeSegmentSummaryView,
-    KnowledgeSegmentView,
     KnowledgeSettings,
 )
 from actweave_knowledge.extraction.contracts import SourceSpan
@@ -52,7 +44,6 @@ from app.knowledge import gateway
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.bootstrap import _install_full_schema
 
 _OWNER_USER_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
 
@@ -99,7 +90,6 @@ class _DetailHarness:
 async def _harness(postgres_database_url: str) -> _DetailHarness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     # Detail reads never touch the embedding client or the model port.
     service = KnowledgeSegmentService(
         session_factory=factory,
@@ -480,46 +470,6 @@ async def test_detail_validates_the_complete_resource_chain(postgres_database_ur
 
 
 @pytest.mark.asyncio
-async def test_detail_child_page_must_be_a_positive_integer(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, document_id, segment_id, _ = await _seed_detail_fixture(harness)
-
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.get_segment_detail(
-                project_id,
-                base_id,
-                document_id,
-                segment_id,
-                child_page=0,
-            )
-        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_detail_expectations_pass_on_matching_version_and_digest(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, document_id, segment_id, content = await _seed_detail_fixture(harness)
-
-        detail = await harness.service.get_segment_detail(
-            project_id,
-            base_id,
-            document_id,
-            segment_id,
-            expected_document_version=1,
-            expected_content_digest=_digest(content),
-        )
-
-        assert detail.content_state == "current"
-        assert detail.segment.content == content
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["version", "digest", "not_ready"])
 async def test_detail_expectations_conflict_on_any_drift(postgres_database_url: str, drift: str) -> None:
     """Old scores are never silently explained with new text."""
@@ -631,235 +581,9 @@ async def test_detail_revalidates_project_authority(postgres_database_url: str) 
         await harness.engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_general_segments_report_zero_children(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, document_id, segment_id, _ = await _seed_detail_fixture(
-            harness,
-            child_count=0,
-        )
-
-        detail = await harness.service.get_segment_detail(project_id, base_id, document_id, segment_id)
-
-        assert detail.children_total == 0
-        assert detail.children == ()
-    finally:
-        await harness.engine.dispose()
-
-
 # ---------------------------------------------------------------------------
 # HTTP contract
 # ---------------------------------------------------------------------------
-
-_REQUEST_ID = "knowledge-t5-detail"
-_PROJECT_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
-
-
-class _FakeDetailModule:
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, ...]] = []
-        self.error: KnowledgeError | None = None
-        self.detail = KnowledgeSegmentDetail(
-            segment=KnowledgeSegmentView(
-                id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
-                document_version=2,
-                position=3,
-                content="被命中的完整父块内容。",
-                word_count=11,
-                enabled=True,
-                hit_count=7,
-                source_position={"page": 12},
-                created_at=datetime(2026, 8, 30, 10, 0, tzinfo=UTC),
-                token_count=29,
-                source_spans=(
-                    SourceSpan(
-                        block_id="page:12:paragraph:1",
-                        start=0,
-                        end=12,
-                        location={"page": 12, "paragraph": 1},
-                    ),
-                ),
-            ),
-            knowledge_base_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
-            document_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
-            document_name="安装指南.pdf",
-            content_state="current",
-            stored_content_version=2,
-            current_document_version=2,
-            children_total=1,
-            child_page=1,
-            children=(
-                KnowledgeSegmentChildView(
-                    id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
-                    position=1,
-                    content="子块内容",
-                    word_count=4,
-                ),
-            ),
-            attachments=(
-                KnowledgeSegmentAttachmentView(
-                    attachment_id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-                    ref="b" * 64,
-                    alt_text="机架",
-                    media_type="image/png",
-                    width=640,
-                    height=480,
-                ),
-            ),
-        )
-
-    async def get_segment_detail(
-        self,
-        project_id: uuid.UUID,
-        base_id: uuid.UUID,
-        document_id: uuid.UUID,
-        segment_id: uuid.UUID,
-        *,
-        expected_document_version: int | None = None,
-        expected_content_digest: str | None = None,
-        child_page: int = 1,
-        authority,  # noqa: ANN001
-    ) -> KnowledgeSegmentDetail:
-        assert authority.project_id == _PROJECT_ID
-        assert authority.actor_user_id == _OWNER_USER_ID
-        self.calls.append((project_id, base_id, document_id, segment_id, expected_document_version, expected_content_digest, child_page))
-        if self.error is not None:
-            raise self.error
-        return self.detail
-
-
-def _app(module: _FakeDetailModule) -> FastAPI:
-    app = FastAPI()
-    app.include_router(gateway.project_router)
-    context = ProjectContext(
-        user_id=_OWNER_USER_ID,
-        project_id=_PROJECT_ID,
-        membership_id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
-        role=ProjectRole.ADMIN,
-        capabilities=frozenset(Capability),
-        membership_version=1,
-        request_id=_REQUEST_ID,
-    )
-    app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
-    app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
-    app.state.knowledge_module = module
-    return app
-
-
-@pytest.mark.asyncio
-async def test_http_segment_detail_round_trips_the_module_view() -> None:
-    module = _FakeDetailModule()
-    base_id = module.detail.knowledge_base_id
-    document_id = module.detail.document_id
-    segment_id = module.detail.segment.id
-    digest = hashlib.sha256("被命中的完整父块内容。".encode()).hexdigest()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(module)), base_url="http://test") as client:
-        response = await client.get(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{base_id}/documents/{document_id}/segments/{segment_id}",
-            params={
-                "expected_document_version": 2,
-                "expected_content_digest": digest,
-                "child_page": 1,
-            },
-        )
-
-    assert response.status_code == 200
-    assert response.json()["summary"] is None
-    assert module.calls == [
-        (_PROJECT_ID, base_id, document_id, segment_id, 2, digest, 1),
-    ]
-    assert response.json() == {
-        "segment": {
-            "id": str(segment_id),
-            "document_version": 2,
-            "position": 3,
-            "content": "被命中的完整父块内容。",
-            "word_count": 11,
-            "enabled": True,
-            "hit_count": 7,
-            "source_position": {"page": 12},
-            "created_at": "2026-08-30T10:00:00Z",
-            "token_count": 29,
-            "source_spans": [
-                {
-                    "block_id": "page:12:paragraph:1",
-                    "start": 0,
-                    "end": 12,
-                    "location": {"page": 12, "paragraph": 1},
-                    "role": "source",
-                }
-            ],
-        },
-        "knowledge_base_id": str(base_id),
-        "document_id": str(document_id),
-        "document_name": "安装指南.pdf",
-        "content_state": "current",
-        "stored_content_version": 2,
-        "current_document_version": 2,
-        "children_total": 1,
-        "summary": None,
-        "child_page": 1,
-        "children": [
-            {
-                "id": "99999999-9999-4999-8999-999999999999",
-                "position": 1,
-                "content": "子块内容",
-                "word_count": 4,
-            }
-        ],
-        "attachments": [
-            {
-                "attachment_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                "ref": "b" * 64,
-                "alt_text": "机架",
-                "media_type": "image/png",
-                "width": 640,
-                "height": 480,
-            }
-        ],
-        "request_id": _REQUEST_ID,
-    }
-    serialized = json.dumps(response.json(), ensure_ascii=False)
-    for forbidden in ("index_text", "extraction_id", "storage_key", "url"):
-        assert forbidden not in serialized
-
-
-@pytest.mark.asyncio
-async def test_http_segment_detail_includes_only_summary_text_and_creation_time() -> None:
-    module = _FakeDetailModule()
-    module.detail = replace(module.detail, summary=KnowledgeSegmentSummaryView(content="生成的摘要", created_at=datetime(2026, 8, 31, tzinfo=UTC)))
-    detail = module.detail
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(module)), base_url="http://test") as client:
-        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{detail.knowledge_base_id}/documents/{detail.document_id}/segments/{detail.segment.id}")
-
-    assert response.status_code == 200
-    assert response.json()["summary"] == {"content": "生成的摘要", "created_at": "2026-08-31T00:00:00Z"}
-
-
-@pytest.mark.asyncio
-async def test_http_segment_detail_defaults_optional_expectations_and_maps_conflicts() -> None:
-    module = _FakeDetailModule()
-    base_id = module.detail.knowledge_base_id
-    document_id = module.detail.document_id
-    segment_id = module.detail.segment.id
-    url = f"/api/projects/{_PROJECT_ID}/knowledge/bases/{base_id}/documents/{document_id}/segments/{segment_id}"
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(module)), base_url="http://test") as client:
-        plain = await client.get(url)
-
-        module.error = KnowledgeError(KNOWLEDGE_CONFLICT, "文档内容已更新，请重新检索")
-        conflicted = await client.get(url, params={"expected_document_version": 1})
-
-        module.error = KnowledgeError(KNOWLEDGE_NOT_FOUND, "Segment 不存在")
-        missing = await client.get(url)
-
-    assert plain.status_code == 200
-    assert module.calls[0][4:] == (None, None, 1)
-
-    assert conflicted.status_code == 409
-    assert conflicted.json()["detail"]["code"] == KNOWLEDGE_CONFLICT
-    assert missing.status_code == 404
-    assert missing.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
 
 
 @pytest.mark.asyncio

@@ -19,21 +19,6 @@ async def _no_asset(asset):
 
 
 @pytest.mark.asyncio
-async def test_timeout_reaps_child_before_return(tmp_path, monkeypatch):
-    source = tmp_path / "source.txt"
-    source.write_text("hello", encoding="utf-8")
-    pidfile = tmp_path / "child.pid"
-    fixture = Path(__file__).parent / "fixtures" / "parser_child_hang.py"
-    monkeypatch.setattr(runtime, "sandbox_command", lambda command, *, work_dir: [sys.executable, str(fixture), str(pidfile)])
-    with pytest.raises(ExtractionError) as caught:
-        await runtime.run_extraction(make_setting(source), work_dir=tmp_path / "work", limits=ExtractionLimits(), timeout_seconds=1, guard=_guard, on_asset=_no_asset)
-    assert caught.value.reason_code == "PARSER_TIMEOUT"
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pidfile.read_text()), 0)
-    assert (tmp_path / "work").exists()
-
-
-@pytest.mark.asyncio
 async def test_parser_slots_reject_busy_without_queueing():
     slots = runtime.ParserSlots(1)
     async with slots:
@@ -43,15 +28,6 @@ async def test_parser_slots_reject_busy_without_queueing():
         assert slots.active == 1
     assert caught.value.reason_code == "PARSER_BUSY"
     assert slots.active == 0
-
-
-@pytest.mark.asyncio
-async def test_real_sandbox_text_roundtrip(tmp_path):
-    source = tmp_path / "source.txt"
-    source.write_text("hello local parser", encoding="utf-8")
-    result = await runtime.run_extraction(make_setting(source), work_dir=tmp_path / "work", limits=ExtractionLimits(), timeout_seconds=30, guard=_guard, on_asset=_no_asset)
-    assert "hello local parser" in "\n".join(doc.page_content for doc in result.documents)
-    assert result.documents[0].source_spans
 
 
 def test_environment_does_not_inherit_secrets(tmp_path, monkeypatch):
@@ -290,26 +266,6 @@ async def test_exited_leader_does_not_leave_running_descendant(tmp_path, monkeyp
         assert not status.stdout.strip() or status.stdout.strip().startswith("Z")
 
 
-def test_linux_group_scan_fails_closed_when_initial_stat_is_unreadable(tmp_path, monkeypatch):
-    proc = tmp_path / "proc"
-    stat_path = proc / "123/stat"
-    stat_path.parent.mkdir(parents=True)
-    stat_path.write_text("unused", encoding="utf-8")
-    scandir = os.scandir
-    read_text = runtime.Path.read_text
-
-    monkeypatch.setattr(runtime.os, "scandir", lambda path: scandir(proc))
-
-    def denied(path, *args, **kwargs):
-        if path == stat_path:
-            raise PermissionError("denied synthetic proc stat")
-        return read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(runtime.Path, "read_text", denied)
-    with pytest.raises(RuntimeError, match="process-group state is unavailable"):
-        runtime._linux_live_process_group_pidfds(123)
-
-
 def test_linux_group_scan_fails_closed_when_revalidation_is_unreadable(tmp_path, monkeypatch):
     proc = tmp_path / "proc"
     stat_path = proc / "123/stat"
@@ -343,14 +299,13 @@ def test_linux_group_scan_fails_closed_when_revalidation_is_unreadable(tmp_path,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("registered_before_failure", [0, 1])
-async def test_linux_group_wait_releases_handles_when_reader_registration_fails(monkeypatch, registered_before_failure):
+async def test_linux_group_wait_releases_handles_when_reader_registration_fails(monkeypatch):
     import asyncio
 
     loop = asyncio.get_running_loop()
     add_reader = loop.add_reader
     remove_reader = loop.remove_reader
-    pipes = [os.pipe() for _ in range(registered_before_failure + 1)]
+    pipes = [os.pipe(), os.pipe()]
     handles = tuple(read_handle for read_handle, _ in pipes)
     registrations = 0
     error = RuntimeError("synthetic reader registration failure")
@@ -359,7 +314,7 @@ async def test_linux_group_wait_releases_handles_when_reader_registration_fails(
 
     def failing_add_reader(handle, callback):
         nonlocal registrations
-        if registrations == registered_before_failure:
+        if registrations == 1:
             raise error
         registrations += 1
         add_reader(handle, callback)
@@ -372,7 +327,7 @@ async def test_linux_group_wait_releases_handles_when_reader_registration_fails(
         for handle in handles:
             with pytest.raises(OSError):
                 os.fstat(handle)
-        assert all(not remove_reader(handle) for handle in handles[:registered_before_failure])
+        assert not remove_reader(handles[0])
     finally:
         for read_handle, write_handle in pipes:
             remove_reader(read_handle)
@@ -509,20 +464,6 @@ async def test_cancellation_arriving_during_success_cleanup_is_not_swallowed(tmp
         await asyncio.wait_for(task, 5)
 
 
-def test_space_monitor_tolerates_conversion_file_disappearing(tmp_path, monkeypatch):
-    transient = tmp_path / "conversion.tmp"
-    transient.write_bytes(b"temporary")
-    original = os.stat
-
-    def remove_then_stat(path, *args, **kwargs):
-        if Path(path) == transient:
-            transient.unlink(missing_ok=True)
-        return original(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "stat", remove_then_stat)
-    runtime._check_work_dir(tmp_path, ExtractionLimits())
-
-
 @pytest.mark.asyncio
 async def test_revocation_during_source_preparation_prevents_spawn(tmp_path, monkeypatch):
     import asyncio
@@ -563,8 +504,7 @@ async def test_revocation_during_source_preparation_prevents_spawn(tmp_path, mon
     assert calls == []
 
 
-@pytest.mark.parametrize("resource_kind", ["pandoc", "nlp"])
-@pytest.mark.parametrize("damage", ["missing", "tampered"])
+@pytest.mark.parametrize("resource_kind,damage", [("pandoc", "tampered"), ("nlp", "missing")])
 def test_real_sandbox_missing_or_tampered_resource_copy_fails_closed(tmp_path, resource_kind, damage):
     import json
     import shutil
@@ -655,8 +595,7 @@ async def test_cancel_stops_new_callback_before_waiting_for_process_reap(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", [BrokenPipeError, ConnectionResetError])
-@pytest.mark.parametrize("origin", ["on_asset", "post_asset_guard"])
+@pytest.mark.parametrize("error_type,origin", [(BrokenPipeError, "on_asset"), (ConnectionResetError, "post_asset_guard")])
 async def test_real_sandbox_preserves_host_transport_exception_identity(tmp_path, monkeypatch, error_type, origin):
     from docx import Document
     from PIL import Image

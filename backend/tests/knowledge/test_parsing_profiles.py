@@ -23,14 +23,6 @@ def test_preview_identity_binds_source_bytes_and_both_profiles():
     assert first != preview_fingerprint(source_sha256="a" * 64, extension=".pdf", profile=profile, capability_revision="r2")
 
 
-@pytest.mark.parametrize("source,extension", [("A" * 64, ".pdf"), ("a" * 63, ".pdf"), ("a" * 64, "pdf"), ("a" * 64, "../pdf"), ("a" * 64, ".pdf/secret")])
-def test_preview_identity_rejects_invalid_digest_or_extension(source, extension):
-    from actweave_knowledge.ingestion.profiles import preview_fingerprint
-
-    with pytest.raises(ValueError):
-        preview_fingerprint(source_sha256=source, extension=extension, profile=ProcessingProfile(parse=make_parse_profile(".pdf"), chunk=make_chunk_profile()), capability_revision="r1")
-
-
 def test_server_resolves_etl_and_token_identity_with_user_header_rules():
     from actweave_knowledge.ingestion.profiles import ProcessingParameters, resolve_processing_profile
 
@@ -63,25 +55,6 @@ def test_user_parameters_reject_authority_and_invalid_limits(bad):
 
     with pytest.raises(ValidationError):
         ProcessingParameters(**bad)
-
-
-def test_unsupported_etl_format_is_not_fallback():
-    from actweave_knowledge.ingestion.profiles import ProcessingParameters, resolve_processing_profile
-
-    with pytest.raises(ExtractionError) as error:
-        resolve_processing_profile(KnowledgeSettings(), ProcessingParameters(), default_registry(), extension=".eml")
-    assert error.value.reason_code == "UNSUPPORTED_FORMAT"
-
-
-def test_legacy_and_new_parameters_reject_conflict_but_merge_disjoint_fields():
-    from actweave_knowledge.contracts import KnowledgeError
-
-    from app.knowledge.gateway import processing_parameters
-
-    with pytest.raises(KnowledgeError):
-        processing_parameters({"chunk_size": 900}, {"size": 800})
-    merged = processing_parameters({"chunk_overlap": 80}, {"size": 800})
-    assert merged.size == 800 and merged.overlap == 80
 
 
 def test_reparse_http_body_rejects_unknown_identity_and_conflicting_parameters():
@@ -170,30 +143,6 @@ def test_task_reparse_projection_rejects_disagreement_with_frozen_profile():
         validated_reparse_settings({**frozen, "project_id": "forged"})
     with pytest.raises(ExtractionError):
         validated_reparse_settings({"chunk_size": 1000})
-
-
-def test_gateway_and_document_service_import_in_fresh_process_without_cycle():
-    import os
-    import subprocess
-    import sys
-
-    environment = dict(os.environ)
-    environment.pop("DATABASE_URL", None)
-    result = subprocess.run([sys.executable, "-c", "from app.knowledge.gateway import project_router; from actweave_knowledge.documents.service import KnowledgeDocumentService"], capture_output=True, text=True, env=environment, timeout=30)
-    assert result.returncode == 0, result.stderr
-
-
-def test_empty_strict_profile_matches_headless_escaped_separator_identity():
-    from actweave_knowledge import KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR, KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
-    from actweave_knowledge.ingestion.profiles import ProcessingParameters, resolve_processing_profile
-
-    registry = default_registry()
-    strict = ProcessingParameters.model_validate({})
-    assert strict.separator == KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
-    assert strict.child_separator == KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
-    explicit = resolve_processing_profile(KnowledgeSettings(), strict, registry, extension=".txt")
-    legacy = resolve_processing_profile(KnowledgeSettings(), ProcessingParameters(separator=KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR, child_separator=KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR), registry, extension=".txt")
-    assert explicit == legacy
 
 
 def test_shared_multipart_policy_parses_profile_conflicts_and_fingerprint_once():

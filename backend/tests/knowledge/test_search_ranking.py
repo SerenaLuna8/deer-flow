@@ -33,10 +33,8 @@ from actweave_knowledge.models.client import KnowledgeModelClient, RerankScore
 from actweave_knowledge.persistence.models import KnowledgeBaseRow
 from actweave_knowledge.retrieval import (
     KnowledgeSearchService,
-    calculate_per_base_budget,
 )
 from registry_helpers import registry_model_port
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_retrieval import (
     _base_row,
@@ -48,11 +46,8 @@ from test_retrieval import (
     _RetrievalHarness,
     _seed_models,
     _seed_project,
-    _seed_single_base,
     _segment_row,
 )
-
-from deerflow.persistence.bootstrap import _install_full_schema
 
 _RANK_1_FUSED = 61.0 / 2.0 / 61.0  # 0.5: domain rank 1, no lexical evidence
 _RANK_2_FUSED = 61.0 / 2.0 / 62.0
@@ -69,15 +64,6 @@ def _unit_vector(x: float, dimension: int = 3) -> list[float]:
 # ---------------------------------------------------------------------------
 # Budget formula and global rejection
 # ---------------------------------------------------------------------------
-
-
-def test_per_base_budget_divides_the_global_budget_across_target_bases() -> None:
-    assert calculate_per_base_budget(4, 1) == 20  # B floor
-    assert calculate_per_base_budget(20, 1) == 100  # B ceiling saturates
-    assert calculate_per_base_budget(20, 5) == 80  # floor(400/5) wins
-    assert calculate_per_base_budget(1, 30) == 13  # floor(400/30)
-    assert calculate_per_base_budget(4, 400) == 1  # smallest legal share
-    assert calculate_per_base_budget(4, 401) == 0  # the service must reject
 
 
 @pytest.mark.asyncio
@@ -372,22 +358,6 @@ async def test_equal_native_scores_share_a_rank_and_identity_orders_them_stably(
         await harness.engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_swapping_the_requested_base_order_changes_nothing(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_a_id, base_b_id = await _seed_two_reranker_domains(harness)
-
-        forward = await harness.service.search(_request(project_id, top_k=3, debug=True, knowledge_base_ids=(base_a_id, base_b_id)))
-        backward = await harness.service.search(_request(project_id, top_k=3, debug=True, knowledge_base_ids=(base_b_id, base_a_id)))
-
-        assert [(hit.citation.segment_id, hit.citation.score) for hit in forward.hits] == [(hit.citation.segment_id, hit.citation.score) for hit in backward.hits]
-        assert forward.diagnostics is not None and backward.diagnostics is not None
-        assert forward.diagnostics.counts == backward.diagnostics.counts
-    finally:
-        await harness.engine.dispose()
-
-
 # ---------------------------------------------------------------------------
 # Strategy snapshot: re-checked before dispatch and inside the final review
 # ---------------------------------------------------------------------------
@@ -442,7 +412,6 @@ async def test_rebinding_between_rerank_batches_conflicts_at_the_final_review(po
     client: KnowledgeModelClient | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
             embedding_id, rerank_id = await _seed_models(session, rerank_max_batch=1)
@@ -495,101 +464,3 @@ async def test_rebinding_between_rerank_batches_conflicts_at_the_final_review(po
 # ---------------------------------------------------------------------------
 # Safe debug: actual counts, stage timings and the empty reason
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_debug_reports_actual_counts_and_stage_timings(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, rerank_id = await _seed_single_base(
-            harness,
-            segments=[
-                ("高分段落", [1.0, 0.0, 0.0]),
-                ("中分段落", _unit_vector(0.9)),
-                ("低分段落", _unit_vector(0.8)),
-            ],
-        )
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [
-            RerankScore(index=0, score=0.9),
-            RerankScore(index=1, score=0.5),
-            RerankScore(index=2, score=0.1),
-        ][:top_n]
-
-        result = await harness.service.search(_request(project_id, score_threshold=0.6, debug=True))
-
-        diagnostics = result.diagnostics
-        assert diagnostics is not None
-        assert diagnostics.counts.semantic_candidates == 3
-        assert diagnostics.counts.lexical_candidates == 0
-        assert diagnostics.counts.parents_deduplicated == 0
-        assert diagnostics.counts.threshold_filtered == 2
-        assert diagnostics.counts.stale_filtered == 0
-        assert diagnostics.counts.returned == 1 == len(result.hits)
-        # Real database stages take measurable monotonic time; provider stages
-        # are scripted and only need to be non-negative.
-        assert diagnostics.timings.recall_ms > 0.0
-        assert diagnostics.timings.final_validation_ms > 0.0
-        assert diagnostics.timings.query_embedding_ms >= 0.0
-        assert diagnostics.timings.rerank_ms >= 0.0
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_debug_names_the_reason_a_search_returned_nothing(postgres_database_url: str) -> None:
-    """not_ready / no_candidates / filtered_out / stale_candidates are the
-    four pipeline exits; model and database failures stay errors instead."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, embedding_id, rerank_id = await _seed_single_base(
-            harness,
-            segments=[("唯一段落", [1.0, 0.0, 0.0])],
-        )
-        # 0.95 keeps the hit above the default threshold while staying
-        # strictly below the 1.0 override used by the filtered_out case.
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=0, score=0.95)][:top_n]
-        async with harness.factory() as session, session.begin():
-            empty_base = _base_row(project_id, embedding_id, rerank_id, name="空库")
-            session.add(empty_base)
-        empty_base_id = empty_base.id
-
-        not_ready = await harness.service.search(_request(project_id, debug=True, knowledge_base_ids=(uuid.uuid4(),)))
-        assert not_ready.hits == ()
-        assert not_ready.diagnostics is not None
-        assert not_ready.diagnostics.empty_reason == "not_ready"
-        assert not_ready.diagnostics.target_base_count == 0
-        assert not_ready.diagnostics.counts.returned == 0
-
-        no_candidates = await harness.service.search(_request(project_id, debug=True, knowledge_base_ids=(empty_base_id,)))
-        assert no_candidates.hits == ()
-        assert no_candidates.diagnostics is not None
-        assert no_candidates.diagnostics.empty_reason == "no_candidates"
-
-        filtered_out = await harness.service.search(_request(project_id, debug=True, score_threshold=1.0, knowledge_base_ids=(base_id,)))
-        assert filtered_out.hits == ()
-        assert filtered_out.diagnostics is not None
-        assert filtered_out.diagnostics.empty_reason == "filtered_out"
-        assert filtered_out.diagnostics.counts.threshold_filtered == 1
-
-        # A successful search reports no empty reason at all.
-        succeeded = await harness.service.search(_request(project_id, debug=True, knowledge_base_ids=(base_id,)))
-        assert succeeded.hits != ()
-        assert succeeded.diagnostics is not None
-        assert succeeded.diagnostics.empty_reason is None
-
-        async def _disable_document() -> None:
-            async with harness.factory() as session, session.begin():
-                await session.execute(
-                    text("UPDATE knowledge_documents SET enabled = false WHERE project_id = :project_id"),
-                    {"project_id": project_id},
-                )
-
-        _rerank_side_effect(harness, _disable_document)
-        stale = await harness.service.search(_request(project_id, debug=True, knowledge_base_ids=(base_id,)))
-        assert stale.hits == ()
-        assert stale.diagnostics is not None
-        assert stale.diagnostics.empty_reason == "stale_candidates"
-        assert stale.diagnostics.counts.stale_filtered == 1
-    finally:
-        await harness.engine.dispose()

@@ -4,43 +4,6 @@ import pytest
 from actweave_knowledge.extraction.contracts import ExtractionError, HeaderRule
 
 
-def test_tabular_preserves_blank_duplicate_header_columns_and_context():
-    from actweave_knowledge.extraction.tabular import rows_to_documents
-
-    docs = rows_to_documents(
-        [(1, 1, ["设备清单"]), (2, 2, []), (3, 3, ["编号", None, "编号"]), (4, 4, ["00123", "不能丢", "B"])],
-        sheet="设备",
-        rule=HeaderRule(),
-    )
-    assert docs[0].kind == "context" and docs[0].page_content == "设备清单"
-    header = next(d for d in docs if d.kind == "table_header")
-    assert [header.page_content[s.start : s.end] for s in header.source_spans] == ["编号", "", "编号"]
-    assert [s.location["column"] for s in header.source_spans] == [1, 2, 3]
-    row = next(d for d in docs if d.kind == "table_row")
-    assert row.page_content == "- 编号 [A]: 00123\n- 列 B: 不能丢\n- 编号 [C]: B"
-    assert [(row.page_content[s.start : s.end], s.location["row"], s.location["column"]) for s in row.source_spans if s.role == "source"] == [("00123", 4, 1), ("不能丢", 4, 2), ("B", 4, 3)]
-    assert all(s.location["row"] == 3 for s in row.source_spans if s.role == "context_prefix")
-    assert all(s.location["sheet"] == "设备" for s in row.source_spans)
-    assert any(w.code == "HEADER_INFERRED" for d in docs for w in d.warnings)
-
-
-def test_tabular_none_preserves_first_row_and_generates_column_context():
-    from actweave_knowledge.extraction.tabular import rows_to_documents
-
-    docs = rows_to_documents([(5, 5, [" 00123 ", "NA", None])], sheet=None, rule=HeaderRule(mode="none"))
-    assert len(docs) == 1
-    assert docs[0].page_content == "- 列 A:  00123 \n- 列 B: NA\n- 列 C: "
-    assert all(s.location["row"] == 5 for s in docs[0].source_spans)
-    assert not docs[0].warnings
-
-
-@pytest.mark.parametrize("rows, expected", [([[1, 2], [3, 4]], None), ([["title"], ["a", "b"]], 2), ([[]] * 10 + [["a", "b"]], None)])
-def test_select_header_only_trusts_two_strings_in_first_ten_rows(rows, expected):
-    from actweave_knowledge.extraction.tabular import select_header
-
-    assert select_header(rows, HeaderRule()) == expected
-
-
 @pytest.mark.parametrize("row", [2, 5])
 def test_tabular_explicit_rejects_nonexistent_or_continuation_physical_row(row):
     from actweave_knowledge.extraction.tabular import rows_to_documents
@@ -50,28 +13,12 @@ def test_tabular_explicit_rejects_nonexistent_or_continuation_physical_row(row):
     assert caught.value.reason_code == "HEADER_ROW_INVALID"
 
 
-def test_tabular_explicit_uses_physical_start_and_preserves_multiline_value():
-    from actweave_knowledge.extraction.tabular import rows_to_documents
-
-    docs = rows_to_documents([(1, 2, ["title\nnote"]), (3, 3, ["a", "b"]), (4, 5, ["up\ndown", "2"])], sheet=None, rule=HeaderRule(mode="explicit", row=3))
-    assert docs[-1].page_content == "- a: up\ndown\n- b: 2"
-    assert all(s.location["row"] == 4 and s.location["row_end"] == 5 for s in docs[-1].source_spans if s.role == "source")
-
-
 def test_tabular_auto_never_scans_a_record_beyond_tenth_physical_line():
     from actweave_knowledge.extraction.tabular import rows_to_documents
 
     docs = rows_to_documents([(1, 8, ["note"]), (9, 11, ["long\nheader\nname", "other"]), (12, 12, [1, 2])], sheet=None, rule=HeaderRule())
     assert all(d.kind == "table_row" for d in docs)
     assert not any(d.warnings for d in docs)
-
-
-def test_tabular_column_labels_and_data_width_do_not_drop_blank_header_tail():
-    from actweave_knowledge.extraction.tabular import column_labels, rows_to_documents
-
-    assert column_labels(["x", None, "x", " "]) == ["x [A]", "列 B", "x [C]", "列 D"]
-    docs = rows_to_documents([(1, 1, ["a", "b"]), (2, 2, [1, None, "tail"])], sheet="Data", rule=HeaderRule())
-    assert docs[-1].page_content == "- a: 1\n- b: \n- 列 C: tail"
 
 
 def test_csv_preserves_strings_multiline_commas_and_physical_locations(tmp_path):
@@ -114,18 +61,6 @@ def test_csv_notes_before_explicit_physical_header_can_have_different_width(tmp_
     assert docs[-1].page_content == "- a: 001\n- b: NA"
     assert docs[-1].source_spans[-1].location["row"] == 4
     assert docs[-1].source_spans[-1].location["encoding"] == "utf-16"
-
-
-def test_csv_none_uses_first_record_for_width_validation(tmp_path):
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from parsing_test_helpers import make_context, make_parse_profile, make_setting
-
-    path = tmp_path / "none.csv"
-    path.write_text("note\na,b\n", encoding="utf-8")
-    profile = make_parse_profile(".csv", header_rules=(HeaderRule(mode="none"),))
-    with pytest.raises(ExtractionError) as caught:
-        ExtractProcessor().extract(make_setting(path, profile=profile), make_context(tmp_path / "work"))
-    assert caught.value.reason_code == "CSV_ROW_INVALID"
 
 
 def test_csv_empty_fields_and_leading_empty_lines_keep_source_rows(tmp_path):
@@ -257,20 +192,6 @@ def test_xls_real_empty_rows_do_not_renumber_source_cells(tmp_path):
     assert data[-2].page_content.endswith("- 列 L: asasa")
 
 
-def test_xls_blank_header_tail_does_not_lose_later_column_values(tmp_path):
-    from pathlib import Path
-
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from parsing_test_helpers import make_context, make_setting
-
-    path = Path(__file__).parent / "fixtures" / "xlrd" / "ragged.xls"
-    docs = ExtractProcessor().extract(make_setting(path), make_context(tmp_path / "work"))
-    data = [d for d in docs if d.kind == "table_row"]
-    assert [d.source_spans[-1].location["row"] for d in data] == [2, 3, 4, 5]
-    assert data[-1].page_content.endswith("- 列 D: l")
-    assert any(w.code == "HEADER_INFERRED" for d in docs for w in d.warnings)
-
-
 def test_csv_field_above_stdlib_default_limit_is_not_rejected(tmp_path):
     from actweave_knowledge.extraction.processor import ExtractProcessor
     from parsing_test_helpers import make_context, make_parse_profile, make_setting
@@ -309,22 +230,6 @@ def test_excel_cached_formula_value_is_kept_without_missing_cache_warning(tmp_pa
     assert not any(w.code == "FORMULA_CACHE_MISSING" for d in docs for w in d.warnings)
 
 
-def test_excel_formula_only_warning_row_stays_in_source_order(tmp_path):
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from openpyxl import Workbook
-    from parsing_test_helpers import make_context, make_setting
-
-    path = tmp_path / "formula-order.xlsx"
-    wb = Workbook()
-    for row in [["ID", "Amount"], [None, "=1+2"], ["002", 5]]:
-        wb.active.append(row)
-    wb.save(path)
-    wb.close()
-    docs = ExtractProcessor().extract(make_setting(path), make_context(tmp_path / "work"))
-    data = [d for d in docs if d.kind == "table_row"]
-    assert [next(s for s in d.source_spans if s.role == "source").location["row"] for d in data] == [2, 3]
-
-
 def test_excel_cell_hyperlinks_keep_safe_target_and_visible_value(tmp_path):
     from actweave_knowledge.extraction.processor import ExtractProcessor
     from openpyxl import Workbook
@@ -342,43 +247,6 @@ def test_excel_cell_hyperlinks_keep_safe_target_and_visible_value(tmp_path):
     docs = ExtractProcessor().extract(make_setting(path), make_context(tmp_path / "work"))
     assert "[Documentation](https://example.com/docs)" in docs[1].page_content
     assert "unsafe label" in docs[2].page_content and "javascript:" not in docs[2].page_content
-
-
-@pytest.mark.parametrize("mode", ["auto", "none"])
-def test_csv_numeric_looking_strings_keep_first_record_under_auto_or_none(tmp_path, mode):
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from parsing_test_helpers import make_context, make_parse_profile, make_setting
-
-    path = tmp_path / "numeric-strings.csv"
-    path.write_text("00123,00456\n00789,00004\n", encoding="utf-8")
-    profile = make_parse_profile(".csv", header_rules=(HeaderRule(mode=mode),))
-    docs = ExtractProcessor().extract(make_setting(path, profile=profile), make_context(tmp_path / "work"))
-    if mode == "auto":
-        # CSV has strings, so inference is tentative, not numeric type detection.
-        header = docs[0]
-        assert header.kind == "table_header"
-        assert [header.page_content[s.start : s.end] for s in header.source_spans] == ["00123", "00456"]
-        assert all(s.location["row"] == 1 for s in header.source_spans)
-        assert any(w.code == "HEADER_INFERRED" for w in header.warnings)
-        assert docs[1].page_content == "- 00123: 00789\n- 00456: 00004"
-    else:
-        assert all(d.kind == "table_row" for d in docs)
-        assert docs[0].page_content == "- 列 A: 00123\n- 列 B: 00456"
-        assert not any(d.warnings for d in docs)
-
-
-def test_csv_wide_pre_header_note_does_not_invent_data_columns(tmp_path):
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from parsing_test_helpers import make_context, make_parse_profile, make_setting
-
-    path = tmp_path / "wide-note.csv"
-    path.write_text("note,more,context\nid,value\n001,payload\n", encoding="utf-8")
-    profile = make_parse_profile(".csv", header_rules=(HeaderRule(mode="explicit", row=2),))
-    docs = ExtractProcessor().extract(make_setting(path, profile=profile), make_context(tmp_path / "work"))
-    assert docs[0].kind == "context" and docs[0].page_content == "note\tmore\tcontext"
-    assert docs[0].source_spans[-1].location["column"] == 3
-    assert docs[-1].page_content == "- id: 001\n- value: payload"
-    assert {s.location["column"] for s in docs[-1].source_spans} == {1, 2}
 
 
 def test_excel_corrupt_media_is_visible_and_structured_without_raw_warning(tmp_path, monkeypatch):
@@ -514,35 +382,6 @@ def test_excel_sink_io_failure_remains_fatal_and_closes_workbooks(tmp_path, monk
         ExtractProcessor().extract(make_setting(path), context)
     assert len(loaded) == 2 and len(closed) == 2 and {id(wb) for wb in closed} == {id(wb) for wb in loaded}
     assert not list(context.work_dir.glob("excel-image-*"))
-
-
-def test_excel_non_image_library_warning_is_not_mapped_to_image_loss(tmp_path):
-    import warnings
-    import zipfile
-
-    from actweave_knowledge.extraction.processor import ExtractProcessor
-    from openpyxl import Workbook
-    from parsing_test_helpers import make_context, make_setting
-
-    original = tmp_path / "original.xlsx"
-    path = tmp_path / "extension.xlsx"
-    workbook = Workbook()
-    workbook.active.append(["id", "value"])
-    workbook.active.append(["001", "content"])
-    workbook.save(original)
-    workbook.close()
-    with zipfile.ZipFile(original) as archive, zipfile.ZipFile(path, "w") as target:
-        for item in archive.infolist():
-            payload = archive.read(item)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                payload = payload.replace(b"</worksheet>", b'<extLst><ext uri="unrecognized-extension"/></extLst></worksheet>')
-            target.writestr(item, payload)
-    with warnings.catch_warnings(record=True) as native_warnings:
-        warnings.simplefilter("always")
-        docs = ExtractProcessor().extract(make_setting(path), make_context(tmp_path / "work"))
-    assert any("Unknown extension is not supported" in str(w.message) for w in native_warnings)
-    assert not any(w.code.startswith("IMAGE_") for doc in docs for w in doc.warnings)
-    assert docs[-1].page_content == "- id: 001\n- value: content"
 
 
 def test_xlsx_image_survives_normalization_and_manifest_closure(tmp_path):

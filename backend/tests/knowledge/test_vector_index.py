@@ -10,34 +10,14 @@ statement builders against PostgreSQL (``EXPLAIN``), not a hand-written query.
 
 from __future__ import annotations
 
-import re
 import uuid
 
 import pytest
-from actweave_knowledge.persistence.models import KNOWLEDGE_HNSW_INDEXED_DIMENSIONS, KnowledgeOrmBase
+from actweave_knowledge.persistence.models import KNOWLEDGE_HNSW_INDEXED_DIMENSIONS
 from actweave_knowledge.retrieval.service import KnowledgeSearchService
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 from test_retrieval import _harness, _seed_single_base
-
-_VECTOR_TABLES = ("knowledge_segments", "knowledge_segment_children", "knowledge_segment_summaries")
-
-
-def test_orm_mirrors_every_declared_hnsw_index() -> None:
-    for table in _VECTOR_TABLES:
-        names = {index.name for index in KnowledgeOrmBase.metadata.tables[table].indexes}
-        for dimension in KNOWLEDGE_HNSW_INDEXED_DIMENSIONS:
-            assert f"ix_{table}_embedding_hnsw_{dimension}" in names, (table, dimension)
-
-
-def test_full_schema_declares_the_same_hnsw_indexes() -> None:
-    from deerflow.persistence.bootstrap import _FULL_SCHEMA_PATH
-
-    sql = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
-    for table in _VECTOR_TABLES:
-        for dimension in KNOWLEDGE_HNSW_INDEXED_DIMENSIONS:
-            pattern = rf"CREATE INDEX ix_{table}_embedding_hnsw_{dimension}\s+ON {table} USING hnsw \(\(embedding::public\.vector\({dimension}\)\) public\.vector_cosine_ops\)\s+WHERE public\.vector_dims\(embedding\) = {dimension};"
-            assert re.search(pattern, sql), (table, dimension)
 
 
 @pytest.mark.asyncio

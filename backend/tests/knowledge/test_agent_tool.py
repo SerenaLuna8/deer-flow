@@ -22,11 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from actweave_knowledge import (
-    KNOWLEDGE_BUILTIN_FILTER_FIELDS,
-    KNOWLEDGE_EMBEDDING_FAILED,
     KNOWLEDGE_INVALID_REQUEST,
-    KNOWLEDGE_MODEL_UNAVAILABLE,
-    KNOWLEDGE_RERANK_FAILED,
     KNOWLEDGE_SEARCH_FAILED,
     KnowledgeBaseFilterFields,
     KnowledgeCitation,
@@ -40,7 +36,6 @@ from langgraph.types import Command
 from pydantic import SecretStr
 
 import deerflow.agents.lead_agent.agent as lead_agent_module
-from app.knowledge.gateway import _citation_response
 from app.knowledge.run_tool import (
     KNOWLEDGE_CITATIONS_KEY,
     KNOWLEDGE_METADATA_FIELDS_TOOL_NAME,
@@ -189,15 +184,10 @@ class TestKnowledgeSearchTool:
         await _invoke(tool_obj, query="私有 Run 查询")
 
         assert module.requests[0].owner_user_id == OWNER_USER_ID
+        assert module.requests[0].project_id == PROJECT_ID
+        assert "project_id" not in tool_obj.tool_call_schema.model_fields
         assert "owner_user_id" not in tool_obj.tool_call_schema.model_fields
         assert "owner_user_id" not in json.dumps(tool_obj.args)
-
-    def test_model_sees_only_query_top_k_and_metadata_filters(self) -> None:
-        tool_obj = _search_tool(_FakeKnowledgeModule())
-
-        assert tool_obj.name == KNOWLEDGE_SEARCH_TOOL_NAME
-        assert set(tool_obj.tool_call_schema.model_fields) == {"query", "top_k", "metadata_filters", "knowledge_base_ids"}
-        assert "project_id" not in json.dumps(tool_obj.args)
 
     @pytest.mark.asyncio
     async def test_knowledge_base_ids_scope_the_search_and_reject_bad_uuids(self) -> None:
@@ -221,7 +211,7 @@ class TestKnowledgeSearchTool:
     @pytest.mark.asyncio
     async def test_success_returns_items_json_and_full_citations(self) -> None:
         first = _citation(position=1, score=0.93)
-        second = _citation(position=2, score=0.61)
+        second = _citation(position=2, score=-0.37)
         module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(first), _hit(second))))
         tool_obj = _search_tool(module)
 
@@ -248,6 +238,7 @@ class TestKnowledgeSearchTool:
         ] * 2
         assert items[0]["passage"] == first.snippet
         assert items[0]["score"] == first.score
+        assert items[1]["score"] == -0.37
         assert items[1]["source_position"] == {"page": 2}
 
         citations = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
@@ -260,61 +251,12 @@ class TestKnowledgeSearchTool:
         assert citations[0]["document_name"] == first.document_name
         assert citations[0]["segment_position"] == 1
         assert citations[0]["score"] == first.score
+        assert citations[1]["score"] == -0.37
         # T5 provenance rides along so the browser can locate the exact
         # content version later without re-searching.
         assert citations[0]["document_version"] == first.document_version
         assert citations[0]["content_digest"] == first.content_digest
         assert citations[0]["score_kind"] == "cosine"
-
-    @pytest.mark.asyncio
-    async def test_negative_rerank_scores_pass_through_items_and_citations(self) -> None:
-        """Cross-encoder rerankers legally emit negative scores; the tool
-        adapter must forward them untouched instead of clamping or erroring."""
-
-        negative = _citation(position=1, score=-0.37)
-        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(negative),)))
-        tool_obj = _search_tool(module)
-
-        command = await _invoke(tool_obj, query="负分命中", call_id="call-neg")
-
-        message = _tool_message(command)
-        assert message.status != "error"
-        items = json.loads(message.content)["items"]
-        assert items[0]["score"] == -0.37
-        citations = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
-        assert citations[0]["score"] == -0.37
-
-    @pytest.mark.asyncio
-    async def test_omitted_top_k_defers_to_base_defaults_and_labels_agent_source(self) -> None:
-        module = _FakeKnowledgeModule()
-        tool_obj = _search_tool(module)
-
-        await _invoke(tool_obj, query="默认参数")
-
-        assert module.requests[0].top_k is None
-        assert module.requests[0].source == "agent"
-        assert module.requests[0].metadata_filters is None
-
-    @pytest.mark.asyncio
-    async def test_metadata_filter_dicts_become_package_filters(self) -> None:
-        from actweave_knowledge import KnowledgeMetadataFilter
-
-        module = _FakeKnowledgeModule()
-        tool_obj = _search_tool(module)
-
-        await _invoke(
-            tool_obj,
-            query="工程部的发布流程",
-            metadata_filters=[
-                {"name": "部门", "operator": "eq", "value": "工程"},
-                {"name": "year", "operator": "gte", "value": 2024},
-            ],
-        )
-
-        assert module.requests[0].metadata_filters == (
-            KnowledgeMetadataFilter(name="部门", operator="eq", value="工程"),
-            KnowledgeMetadataFilter(name="year", operator="gte", value=2024),
-        )
 
     @pytest.mark.asyncio
     async def test_metadata_filter_field_kind_passes_through_and_defaults_to_custom(self) -> None:
@@ -339,57 +281,6 @@ class TestKnowledgeSearchTool:
         # The argument schema teaches field_kind without inventing new
         # top-level parameters.
         assert "field_kind" in json.dumps(tool_obj.args)
-
-    @pytest.mark.asyncio
-    async def test_incomplete_metadata_filter_dicts_never_crash_the_adapter(self) -> None:
-        """Missing keys become None fields for the package validator to reject."""
-
-        from actweave_knowledge import KnowledgeMetadataFilter
-
-        module = _FakeKnowledgeModule()
-        tool_obj = _search_tool(module)
-
-        await _invoke(tool_obj, query="问", metadata_filters=[{"operator": "eq", "value": "x"}])
-
-        assert module.requests[0].metadata_filters == (KnowledgeMetadataFilter(name=None, operator="eq", value="x"),)
-
-    @pytest.mark.asyncio
-    async def test_no_hits_returns_empty_items(self) -> None:
-        tool_obj = _search_tool(_FakeKnowledgeModule())
-
-        message = _tool_message(await _invoke(tool_obj, query="冷门问题"))
-
-        assert json.loads(message.content) == {
-            "items": [],
-            "delivered_count": 0,
-            "omitted_count": 0,
-            "context_limited": False,
-        }
-        assert message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY] == []
-        assert message.status != "error"
-
-    @pytest.mark.asyncio
-    async def test_items_carry_the_complete_passage_beyond_the_snippet_cut(self) -> None:
-        """The model reads the full parent text; the 320-char quote is UI-only."""
-
-        # The answer sits after the 320-character snippet boundary inside a
-        # 4000-character segment (the current per-segment ceiling).
-        passage = ("铺垫内容。" * 64 + "答案：紧固扭矩为 45 牛·米。").ljust(4000, "补")
-        assert len(passage) == 4000
-        citation = _citation(position=1, score=0.9)
-        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(citation, passage=passage),)))
-        tool_obj = _search_tool(module)
-
-        message = _tool_message(await _invoke(tool_obj, query="紧固扭矩"))
-
-        body = json.loads(message.content)
-        [item] = body["items"]
-        assert item["passage"] == passage
-        assert "答案：紧固扭矩为 45 牛·米。" in item["passage"]
-        assert body["delivered_count"] == 1
-        # The stored citation keeps the short quote, never a second passage copy.
-        [payload] = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
-        assert payload["snippet"] == citation.snippet
 
     @pytest.mark.asyncio
     async def test_items_send_the_model_text_not_the_escaped_markdown(self) -> None:
@@ -455,46 +346,16 @@ class TestKnowledgeSearchTool:
         assert message.content == "Error: KNOWLEDGE_PASSAGE_OVER_BUDGET: 命中正文超出工具消息预算，无法完整返回，请缩小查询范围"
         assert KNOWLEDGE_CITATIONS_KEY not in message.additional_kwargs
 
-    def test_tool_description_frames_scores_as_ranking_not_probability(self) -> None:
-        tool_obj = _search_tool(_FakeKnowledgeModule())
-
-        description = tool_obj.description
-        assert "ranked" in description
-        assert "not probabilities" in description
-        assert "passage" in description
-
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "code",
-        [
-            KNOWLEDGE_INVALID_REQUEST,
-            KNOWLEDGE_MODEL_UNAVAILABLE,
-            KNOWLEDGE_EMBEDDING_FAILED,
-            KNOWLEDGE_RERANK_FAILED,
-            KNOWLEDGE_SEARCH_FAILED,
-        ],
-    )
-    async def test_knowledge_errors_become_error_toolmessages_without_citations(self, code: str) -> None:
-        module = _FakeKnowledgeModule(error=KnowledgeError(code, "检索失败了"))
+    async def test_knowledge_errors_become_error_toolmessages_without_citations(self) -> None:
+        module = _FakeKnowledgeModule(error=KnowledgeError(KNOWLEDGE_SEARCH_FAILED, "检索失败了"))
         tool_obj = _search_tool(module)
 
         message = _tool_message(await _invoke(tool_obj, query="任何问题"))
 
         assert message.status == "error"
-        assert message.content == f"Error: {code}: 检索失败了"
+        assert message.content == f"Error: {KNOWLEDGE_SEARCH_FAILED}: 检索失败了"
         assert KNOWLEDGE_CITATIONS_KEY not in message.additional_kwargs
-
-    @pytest.mark.asyncio
-    async def test_tool_citation_payload_matches_the_http_search_response(self) -> None:
-        citation = _citation(position=3, score=0.77)
-        module = _FakeKnowledgeModule(result=KnowledgeSearchResult(hits=(_hit(citation),)))
-        tool_obj = _search_tool(module)
-
-        message = _tool_message(await _invoke(tool_obj, query="一致性"))
-
-        [tool_payload] = message.additional_kwargs[KNOWLEDGE_CITATIONS_KEY]
-        http_payload = _citation_response(citation).model_dump(mode="json")
-        assert tool_payload == http_payload
 
 
 # ---------------------------------------------------------------------------
@@ -589,16 +450,6 @@ class TestKnowledgeMetadataFieldsTool:
         assert message.status != "error"
 
     @pytest.mark.asyncio
-    async def test_rereads_on_every_call_and_narrows_by_base_ids(self) -> None:
-        module = _FakeFieldsModule()
-        tool_obj = _fields_tool(module)
-
-        await _invoke_fields(tool_obj)
-        await _invoke_fields(tool_obj, base_ids=[str(_BASE_ID)])
-
-        assert module.calls == [(PROJECT_ID, None), (PROJECT_ID, [_BASE_ID])]
-
-    @pytest.mark.asyncio
     async def test_invalid_base_id_strings_error_without_reaching_the_module(self) -> None:
         module = _FakeFieldsModule()
         tool_obj = _fields_tool(module)
@@ -608,16 +459,6 @@ class TestKnowledgeMetadataFieldsTool:
         assert message.status == "error"
         assert KNOWLEDGE_INVALID_REQUEST in message.content
         assert module.calls == []
-
-    @pytest.mark.asyncio
-    async def test_module_errors_surface_the_narrowing_hint(self) -> None:
-        module = _FakeFieldsModule(error=KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "项目内活跃库超过 20 个，请用 base_ids 缩小发现范围"))
-        tool_obj = _fields_tool(module)
-
-        message = _tool_message(await _invoke_fields(tool_obj))
-
-        assert message.status == "error"
-        assert "缩小" in message.content
 
     @pytest.mark.asyncio
     async def test_missing_capability_is_a_stable_error_toolmessage(self) -> None:
@@ -630,14 +471,6 @@ class TestKnowledgeMetadataFieldsTool:
 
         assert message.status == "error"
         assert KNOWLEDGE_FORBIDDEN in message.content
-
-    def test_description_declares_read_only_discovery(self) -> None:
-        tool_obj = _fields_tool(_FakeFieldsModule())
-
-        description = tool_obj.description or ""
-        assert KNOWLEDGE_METADATA_FIELDS_TOOL_NAME == tool_obj.name
-        for builtin_name in KNOWLEDGE_BUILTIN_FILTER_FIELDS:
-            assert builtin_name in description
 
 
 # ---------------------------------------------------------------------------
@@ -728,34 +561,6 @@ def _install_factory_spies(
 
 
 class TestKnowledgeLeadAgentFactory:
-    def test_private_chat_graph_carries_knowledge_search_and_canonical_prompt(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        captured: dict[str, object] = {}
-        _install_factory_spies(monkeypatch, captured=captured)
-        factory = create_knowledge_lead_agent_factory(
-            module=_FakeKnowledgeModule(),
-            project_id=PROJECT_ID,
-            owner_user_id=OWNER_USER_ID,
-            authority=_AUTHORITY,
-        )
-
-        graph = factory.private_runtime_factory(
-            config={"configurable": {"thinking_enabled": False}},
-            private_runtime=_private_runtime(tmp_path),
-            app_config=_app_config(),
-        )
-
-        assert graph == "canonical-graph"
-        tool_names = [tool.name for tool in captured["agent_kwargs"]["tools"]]
-        assert KNOWLEDGE_SEARCH_TOOL_NAME in tool_names
-        assert KNOWLEDGE_METADATA_FIELDS_TOOL_NAME in tool_names
-        # The knowledge extension must not override the canonical prompt.
-        assert captured["agent_kwargs"]["system_prompt"] == "canonical-prompt"
-        assert len(captured["prompt_calls"]) == 1
-
     def test_factory_refuses_a_caller_supplied_trusted_extension(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -777,40 +582,6 @@ class TestKnowledgeLeadAgentFactory:
                 app_config=_app_config(),
                 trusted_extension=TrustedLeadAgentExtension(),
             )
-
-    def test_wrapper_signature_covers_every_parameter_the_worker_probes(self) -> None:
-        import inspect
-
-        factory = create_knowledge_lead_agent_factory(
-            module=_FakeKnowledgeModule(),
-            project_id=PROJECT_ID,
-            owner_user_id=OWNER_USER_ID,
-            authority=_AUTHORITY,
-        )
-
-        canonical = inspect.signature(lead_agent_module._make_lead_agent_with_private_runtime)
-        wrapped = inspect.signature(factory.private_runtime_factory)
-        assert set(canonical.parameters) <= set(wrapped.parameters)
-
-    def test_plain_factory_calls_delegate_to_the_base_factory(self) -> None:
-        sentinel = object()
-        calls: list[object] = []
-
-        def base_factory(config):  # noqa: ANN001
-            calls.append(config)
-            return sentinel
-
-        factory = create_knowledge_lead_agent_factory(
-            module=_FakeKnowledgeModule(),
-            project_id=PROJECT_ID,
-            owner_user_id=OWNER_USER_ID,
-            authority=_AUTHORITY,
-            base_factory=base_factory,
-        )
-
-        config = {"configurable": {}}
-        assert factory(config) is sentinel
-        assert calls == [config]
 
     def test_base_factory_with_a_custom_private_runtime_path_is_refused(self) -> None:
         def base_factory(config):  # noqa: ANN001

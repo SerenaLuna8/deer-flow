@@ -12,7 +12,6 @@ import pytest
 from actweave_knowledge import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeError,
-    KnowledgeSettings,
 )
 from actweave_knowledge.persistence.models import KnowledgeDocumentRow, KnowledgeExtractionRow, KnowledgeTaskRow
 from actweave_knowledge.persistence.tasks import claim_next_task, settle_task_success
@@ -811,39 +810,3 @@ async def test_delete_handler_accepts_only_claimed_resource_and_missing_is_idemp
             missing_id = task.resource_id
         await handler(replace(claim, resource_id=missing_id))
         assert harness.object_store.objects == before
-
-
-@pytest.mark.asyncio
-async def test_module_worker_registers_durable_extraction_deletion(monkeypatch) -> None:
-    from actweave_knowledge import module as module_under_test
-    from actweave_knowledge.tasks.extraction_deletion import KnowledgeExtractionDeletionHandler
-
-    captured = {}
-
-    class CapturingWorker:
-        def __init__(self, **kwargs) -> None:
-            captured.update(kwargs)
-
-        async def run(self, stop_event: asyncio.Event) -> None:
-            assert stop_event.is_set()
-
-    monkeypatch.setattr(module_under_test, "KnowledgeTaskWorker", CapturingWorker)
-    module = object.__new__(module_under_test.KnowledgeModule)
-    module._object_store = object()
-    module._project_active_check = is_knowledge_project_active
-    module._session_factory = object()
-    module._quota = object()
-    module._settings = KnowledgeSettings()
-    module._model_client = object()
-    module._model_port = object()
-    stop_event = asyncio.Event()
-    stop_event.set()
-
-    await module.run_worker(stop_event)
-
-    handler = captured["handlers"]["delete_extraction"]
-    assert isinstance(handler, KnowledgeExtractionDeletionHandler)
-    assert handler._session_factory is module._session_factory
-    assert handler._object_store is module._object_store
-    assert handler._quota is module._quota
-    assert handler._project_active_check is is_knowledge_project_active

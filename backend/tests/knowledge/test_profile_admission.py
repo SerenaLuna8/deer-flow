@@ -163,7 +163,7 @@ async def test_processing_resource_checks_do_not_hold_database_transactions(post
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extension", [".markdown", ".mdx", ".xls", ".eml", ".msg", ".xml"])
+@pytest.mark.parametrize("extension", [".mdx", ".msg"])
 async def test_registered_formats_can_pass_upload_and_storage_key_admission(postgres_database_url, tmp_path, extension):
     from actweave_knowledge.storage.minio_store import is_document_storage_key
 

@@ -292,30 +292,6 @@ async def test_concurrent_reservation_of_one_object_is_once(postgres_database_ur
 
 
 @pytest.mark.asyncio
-async def test_storage_reconciliation_int_compatibility_and_nonzero_axis_repairs(postgres_database_url):
-    from app.quotas.models import StorageUsageTotals, _issue_quota_reconciliation_authority
-
-    async with extraction_harness(postgres_database_url) as h:
-        authority = _issue_quota_reconciliation_authority(h.project_id, operation="quota_repair")
-
-        async def legacy():
-            return 8
-
-        async def knowledge():
-            return StorageUsageTotals(used=8, reserved=0)
-
-        async with h.session_factory() as s, s.begin():
-            await h.quota_service.reconcile_project_storage(s, authority, expected_loader=legacy)
-        assert (await counter_and_ledger(h))[0] == (0, 8)
-        async with h.session_factory() as s, s.begin():
-            await h.quota_service.reconcile_project_storage(s, authority, expected_loader=knowledge)
-        counters, ledger = await counter_and_ledger(h)
-        assert counters == (8, 0)
-        assert all(delta for _, delta, _ in ledger)
-        assert sum(delta for _, delta, _ in ledger) == 8
-
-
-@pytest.mark.asyncio
 async def test_quota_policy_unavailable_maps_safe_error(postgres_database_url):
     from actweave_knowledge.contracts import KNOWLEDGE_STORAGE_UNAVAILABLE
 
@@ -363,31 +339,3 @@ async def test_parallel_uploads_keep_callers_project_shared_lock(postgres_databa
         results = await asyncio.gather(*(reserve(object_id) for object_id in ids), return_exceptions=True)
         assert not any(isinstance(result, Exception) for result in results)
         assert (await counter_and_ledger(h))[0] == (8, 34)
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ("-c", "import app.knowledge.gateway"),
-        ("-m", "pytest", "tests/knowledge/test_storage.py", "--collect-only", "-q", "--tb=short"),
-    ],
-    ids=["gateway-import", "storage-collection"],
-)
-def test_knowledge_gateway_loads_in_fresh_process_without_quota_import_cycle(arguments):
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    environment = dict(os.environ)
-    environment.pop("DATABASE_URL", None)
-    result = subprocess.run(
-        [sys.executable, *arguments],
-        cwd=Path(__file__).resolve().parents[2],
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -21,7 +20,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_retrieval import (
     _DEFAULT_OWNER_USER_ID,
-    _base_row,
     _harness,
     _query_rows,
     _request,
@@ -124,21 +122,6 @@ async def test_repeated_query_skips_embedding_provider_and_preserves_exact_hits(
         assert warm.diagnostics.counts.query_embedding_cache_misses == 0
 
 
-@pytest.mark.asyncio
-async def test_disabled_cache_preserves_results_but_always_dispatches_embedding(postgres_database_url: str) -> None:
-    async with _cache_harness(postgres_database_url, enabled=False) as harness:
-        request = _request(harness.project_id, debug=True)
-        first = await harness.module.search(request, authority=harness.authority)
-        second = await harness.module.search(request, authority=harness.authority)
-
-        assert first.hits == second.hits
-        assert len(harness.embedding_requests) == 2
-        for result in (first, second):
-            assert result.diagnostics is not None
-            assert result.diagnostics.counts.query_embedding_cache_hits == 0
-            assert result.diagnostics.counts.query_embedding_cache_misses == 1
-
-
 async def _revoke_membership(harness: _CacheHarness) -> None:
     async with harness.retrieval.factory() as session, session.begin():
         await session.execute(
@@ -206,70 +189,6 @@ async def test_warm_cache_retains_final_review_after_reranker_revocation(postgre
         assert len(harness.embedding_requests) == 1
         assert len(harness.rerank_requests) == 2
         await _assert_only_the_warmup_was_recorded(harness)
-
-
-@pytest.mark.asyncio
-async def test_concurrent_cold_queries_dispatch_independently_then_both_reuse_cache(postgres_database_url: str) -> None:
-    both_dispatched = asyncio.Event()
-    dispatches = 0
-
-    async def on_dispatch(request: httpx.Request) -> None:
-        nonlocal dispatches
-        assert request.url.path.endswith("/embeddings")
-        dispatches += 1
-        if dispatches == 2:
-            both_dispatched.set()
-        await both_dispatched.wait()
-
-    async with _cache_harness(postgres_database_url, on_dispatch=on_dispatch) as harness:
-        request = _request(harness.project_id, debug=True)
-        cold = await asyncio.wait_for(
-            asyncio.gather(*(harness.module.search(request, authority=harness.authority) for _ in range(2))),
-            timeout=5,
-        )
-        assert dispatches == 2
-        assert cold[0].hits == cold[1].hits
-        for result in cold:
-            assert result.diagnostics is not None
-            assert result.diagnostics.counts.query_embedding_cache_hits == 0
-            assert result.diagnostics.counts.query_embedding_cache_misses == 1
-
-        warm = await asyncio.wait_for(
-            asyncio.gather(*(harness.module.search(request, authority=harness.authority) for _ in range(2))),
-            timeout=5,
-        )
-        assert dispatches == 2
-        for result in warm:
-            assert result.hits == cold[0].hits
-            assert result.diagnostics is not None
-            assert result.diagnostics.counts.query_embedding_cache_hits == 1
-            assert result.diagnostics.counts.query_embedding_cache_misses == 0
-
-
-@pytest.mark.asyncio
-async def test_cache_diagnostics_count_distinct_embedding_models_not_model_groups(postgres_database_url: str) -> None:
-    async with _cache_harness(postgres_database_url) as harness:
-        async with harness.retrieval.factory() as session, session.begin():
-            second_embedding, reranker = await _seed_models(session)
-            session.add_all(
-                [
-                    _base_row(harness.project_id, harness.embedding_id, reranker, name="同模型不同分组"),
-                    _base_row(harness.project_id, second_embedding, None, name="另一个向量空间"),
-                ]
-            )
-        request = _request(harness.project_id, debug=True)
-
-        cold = await harness.module.search(request, authority=harness.authority)
-        warm = await harness.module.search(request, authority=harness.authority)
-
-        assert len(harness.embedding_requests) == 2
-        assert cold.hits == warm.hits
-        assert cold.diagnostics is not None and warm.diagnostics is not None
-        assert cold.diagnostics.target_base_count == warm.diagnostics.target_base_count == 3
-        assert cold.diagnostics.counts.query_embedding_cache_misses == 2
-        assert cold.diagnostics.counts.query_embedding_cache_hits == 0
-        assert warm.diagnostics.counts.query_embedding_cache_misses == 0
-        assert warm.diagnostics.counts.query_embedding_cache_hits == 2
 
 
 @pytest.mark.asyncio

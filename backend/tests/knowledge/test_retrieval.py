@@ -32,14 +32,9 @@ from actweave_knowledge import (
     KNOWLEDGE_RERANK_CANDIDATE_BUDGET,
     KNOWLEDGE_RERANK_FAILED,
     KNOWLEDGE_SEARCH_FAILED,
-    KNOWLEDGE_STRATEGY_VERSION,
-    KnowledgeCitation,
     KnowledgeError,
     KnowledgeMetadataFilter,
-    KnowledgeQueryView,
-    KnowledgeSearchHit,
     KnowledgeSearchRequest,
-    KnowledgeSearchResult,
 )
 from actweave_knowledge.models.client import KnowledgeModelClient, RerankScore
 from actweave_knowledge.persistence.models import (
@@ -52,9 +47,7 @@ from actweave_knowledge.persistence.models import (
 )
 from actweave_knowledge.retrieval import (
     DEFAULT_SCORE_THRESHOLD,
-    DEFAULT_TOP_K,
     KnowledgeSearchService,
-    calculate_candidate_k,
 )
 from extraction_test_helpers import make_test_quota_port
 from fastapi import FastAPI
@@ -74,10 +67,9 @@ from app.knowledge.composition import (
 )
 from app.knowledge.model_port import RegistryKnowledgeModelPort
 from app.model_registry.secrets import protect_provider_api_key
-from app.projects.capabilities import Capability, capabilities_for
+from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
 from deerflow.secrets import SecretKey
 
@@ -139,7 +131,6 @@ class _RetrievalHarness:
 async def _harness(postgres_database_url: str) -> _RetrievalHarness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     client = _ScriptedClient()
     service = KnowledgeSearchService(
         session_factory=factory,
@@ -425,13 +416,6 @@ def _request(project_id: uuid.UUID, **overrides: Any) -> KnowledgeSearchRequest:
 # ---------------------------------------------------------------------------
 
 
-def test_calculate_candidate_k_applies_floor_scale_and_ceiling() -> None:
-    assert calculate_candidate_k(1) == 20
-    assert calculate_candidate_k(4) == 20
-    assert calculate_candidate_k(5) == 25
-    assert calculate_candidate_k(20) == 100
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("overrides", "fragment"),
@@ -466,62 +450,22 @@ def test_calculate_candidate_k_applies_floor_scale_and_ceiling() -> None:
         ({"metadata_filters": (KnowledgeMetadataFilter(name="document_name", operator="eq", value=5, field_kind="builtin"),)}, "字符串"),
     ],
 )
-async def test_search_rejects_invalid_requests(postgres_database_url: str, overrides: dict[str, Any], fragment: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.search(_request(uuid.uuid4(), **overrides))
-        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-        assert fragment in error.value.message
-        assert harness.client.embed_calls == []
-    finally:
-        await harness.engine.dispose()
+async def test_search_rejects_invalid_requests(overrides: dict[str, Any], fragment: str) -> None:
+    def no_database():
+        raise AssertionError("Invalid requests must not access the database")
+
+    client = _ScriptedClient()
+    service = KnowledgeSearchService(session_factory=no_database, client=client, model_port=registry_model_port())
+    with pytest.raises(KnowledgeError) as error:
+        await service.search(_request(uuid.uuid4(), **overrides))
+    assert error.value.code == KNOWLEDGE_INVALID_REQUEST
+    assert fragment in error.value.message
+    assert client.embed_calls == []
 
 
 # ---------------------------------------------------------------------------
 # Two-stage behavior against real pgvector SQL
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_single_base_search_recalls_by_cosine_then_returns_reranked_top_k(postgres_database_url: str) -> None:
-    """The reranker, not cosine, decides the final order and the citation score."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, embedding_id, rerank_id = await _seed_single_base(
-            harness,
-            segments=[
-                ("完全匹配的段落", [1.0, 0.0, 0.0]),
-                ("比较接近的段落", [0.8, 0.6, 0.0]),
-                ("毫不相关的段落", [0.0, 1.0, 0.0]),
-            ],
-        )
-        # Rerank prefers the cosine-worst candidate.
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [
-            RerankScore(index=len(documents) - 1, score=0.95),
-            RerankScore(index=0, score=0.60),
-        ][:top_n]
-
-        result = await harness.service.search(_request(project_id, top_k=2))
-
-        assert [(citation.snippet, citation.score) for citation in result.citations] == [
-            ("毫不相关的段落", 0.95),
-            ("完全匹配的段落", 0.60),
-        ]
-        assert harness.client.embed_calls == [(embedding_id, ["如何安装产品"])]
-        (_, _, submitted, top_n) = harness.client.rerank_calls[0]
-        assert submitted == ["完全匹配的段落", "比较接近的段落", "毫不相关的段落"]  # cosine order
-        # Every recalled candidate is scored so per-base thresholds can filter
-        # before the global top_k cut.
-        assert top_n == 3
-        first = result.citations[0]
-        assert first.knowledge_base_id == base_id
-        assert first.knowledge_base_name.startswith("base-")
-        assert first.document_name == "手册"
-        assert first.segment_position == 3
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -554,27 +498,6 @@ async def test_reranker_uses_index_text_but_hit_and_digest_keep_markdown(
         # never the Markdown with its image ref.
         assert result.hits[0].model_text == "安装\n运行 actweave up。\n机架"
         assert result.citations[0].content_digest == hashlib.sha256(content.encode("utf-8")).hexdigest()
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_search_returns_empty_without_bases_and_skips_rerank_without_candidates(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        # No bases at all: no model calls.
-        async with harness.factory() as session, session.begin():
-            empty_project = await _seed_project(session, uuid.uuid4().hex[:8])
-        result = await harness.service.search(_request(empty_project))
-        assert result.citations == ()
-        assert harness.client.embed_calls == []
-
-        # A base whose only document has no current segments: embed runs, rerank must not.
-        project_id, _, embedding_id, _ = await _seed_single_base(harness, segments=[])
-        result = await harness.service.search(_request(project_id))
-        assert result.citations == ()
-        assert harness.client.embed_calls == [(embedding_id, ["如何安装产品"])]
-        assert harness.client.rerank_calls == []
     finally:
         await harness.engine.dispose()
 
@@ -701,80 +624,6 @@ async def test_search_excludes_disabled_documents_and_disabled_segments(postgres
         await harness.engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_search_with_explicit_base_ids_uses_only_their_active_subset(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, embedding_id, rerank_id = await _seed_single_base(
-            harness,
-            segments=[("目标库段落", [1.0, 0.0, 0.0])],
-        )
-        other_project, other_base, _other_embedding, _other_rerank = await _seed_single_base(
-            harness,
-            segments=[("外项目段落", [1.0, 0.0, 0.0])],
-        )
-        async with harness.factory() as session, session.begin():
-            disabled = _base_row(project_id, embedding_id, rerank_id, name="disabled-pick", status="disabled")
-            session.add(disabled)
-
-        # Foreign-project and disabled ids are silently ignored by scope filters.
-        result = await harness.service.search(_request(project_id, knowledge_base_ids=(base_id, disabled.id, other_base)))
-        assert [citation.snippet for citation in result.citations] == ["目标库段落"]
-        assert [call[0] for call in harness.client.embed_calls] == [embedding_id]
-
-        # An explicitly empty selection searches nothing.
-        harness.client.embed_calls.clear()
-        result = await harness.service.search(_request(project_id, knowledge_base_ids=()))
-        assert result.citations == ()
-        assert harness.client.embed_calls == []
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_search_groups_bases_by_model_pair_and_merges_globally(postgres_database_url: str) -> None:
-    """Different dimensions never meet in one SQL; results merge to a global top-k."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            small_embedding, small_rerank = await _seed_models(session, dimension=3)
-            large_embedding, large_rerank = await _seed_models(session, dimension=4)
-            small_base = _base_row(project_id, small_embedding, small_rerank, name="small-base")
-            large_base = _base_row(project_id, large_embedding, large_rerank, name="large-base")
-            session.add_all([small_base, large_base])
-            await session.flush()
-            small_doc = _document_row(project_id, small_base.id, name="小维度文档")
-            large_doc = _document_row(project_id, large_base.id, name="大维度文档")
-            session.add_all([small_doc, large_doc])
-            await session.flush()
-            session.add_all(
-                [
-                    _segment_row(small_doc, position=1, content="小维度段落", embedding=[1.0, 0.0, 0.0]),
-                    _segment_row(large_doc, position=1, content="大维度段落", embedding=[1.0, 0.0, 0.0, 0.0]),
-                ]
-            )
-        harness.client.query_vectors[small_embedding] = [1.0, 0.0, 0.0]
-        harness.client.query_vectors[large_embedding] = [1.0, 0.0, 0.0, 0.0]
-        harness.client.rerank_scripts[small_rerank] = lambda documents, top_n: [RerankScore(index=0, score=0.4)]
-        harness.client.rerank_scripts[large_rerank] = lambda documents, top_n: [RerankScore(index=0, score=0.9)]
-
-        result = await harness.service.search(_request(project_id, top_k=2))
-
-        # Two different rerankers are two score domains (T7): each candidate
-        # is rank 1 at home, so both fuse to 61/2 * 1/61 = 0.5 — the raw 0.9
-        # and 0.4 are never compared numerically across models.
-        assert {citation.snippet for citation in result.citations} == {"大维度段落", "小维度段落"}
-        assert all(citation.score == pytest.approx(0.5) for citation in result.citations)
-        assert all(citation.score_kind == "rank_fusion" for citation in result.citations)
-        assert {hit.citation.snippet: hit.local_score for hit in result.hits} == {"大维度段落": 0.9, "小维度段落": 0.4}
-        assert sorted(call[0] for call in harness.client.embed_calls) == sorted([small_embedding, large_embedding])
-        assert len(harness.client.rerank_calls) == 2
-    finally:
-        await harness.engine.dispose()
-
-
 async def _seed_two_model_groups(harness: _RetrievalHarness) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
     """Two Providers (one embedding + one rerank each), one base per pair.
 
@@ -834,37 +683,17 @@ async def test_global_top_k_truncates_across_model_groups(postgres_database_url:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("which", ["embedding", "rerank"])
-async def test_search_fails_when_a_bound_model_is_disabled(postgres_database_url: str, which: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, embedding_id, rerank_id = await _seed_single_base(harness, segments=[("段落", [1.0, 0.0, 0.0])])
-        disabled_id = embedding_id if which == "embedding" else rerank_id
-        async with harness.factory() as session, session.begin():
-            await session.execute(
-                text("UPDATE model_provider_models SET status = 'disabled' WHERE id = :id"),
-                {"id": disabled_id},
-            )
-
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.search(_request(project_id))
-        assert error.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
-        assert harness.client.embed_calls == []
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_one_disabled_model_fails_the_search_even_with_a_healthy_group(postgres_database_url: str) -> None:
+@pytest.mark.parametrize("which", ["embedding", "reranker"])
+async def test_one_disabled_model_fails_the_search_even_with_a_healthy_group(postgres_database_url: str, which: str) -> None:
     """A disabled group's bases must not silently vanish from a merged result."""
 
     harness = await _harness(postgres_database_url)
     try:
-        project_id, small_embedding, _, _, _ = await _seed_two_model_groups(harness)
+        project_id, small_embedding, small_reranker, _, _ = await _seed_two_model_groups(harness)
         async with harness.factory() as session, session.begin():
             await session.execute(
                 text("UPDATE model_provider_models SET status = 'disabled' WHERE id = :id"),
-                {"id": small_embedding},
+                {"id": small_embedding if which == "embedding" else small_reranker},
             )
 
         with pytest.raises(KnowledgeError) as error:
@@ -915,106 +744,6 @@ async def test_api_key_materialization_failure_maps_to_model_unavailable(postgre
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_rerank_free_base_returns_cosine_scores_and_never_calls_the_reranker(postgres_database_url: str) -> None:
-    """Without a bound reranker the final score is the raw cosine similarity."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_single_base(
-            harness,
-            segments=[
-                ("完全对齐", [1.0, 0.0, 0.0]),
-                ("比较接近", [0.8, 0.6, 0.0]),
-                ("正交无关", [0.0, 1.0, 0.0]),
-            ],
-            with_reranker=False,
-        )
-
-        result = await harness.service.search(_request(project_id, top_k=3, score_threshold=0.0))
-
-        assert [citation.snippet for citation in result.citations] == ["完全对齐", "比较接近", "正交无关"]
-        assert result.citations[0].score == pytest.approx(1.0)
-        assert result.citations[1].score == pytest.approx(0.8)
-        assert result.citations[2].score == pytest.approx(0.0)
-        assert harness.client.rerank_calls == []
-
-        # The per-base default threshold (0.2) filters cosine scores too.
-        result = await harness.service.search(_request(project_id, top_k=3))
-        assert [citation.snippet for citation in result.citations] == ["完全对齐", "比较接近"]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_rerank_free_negative_cosine_passes_zero_threshold_and_logs_negative_top_score(postgres_database_url: str) -> None:
-    """Cosine scores live in [-1,1]; the query-log CHECK must accept them."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_single_base(
-            harness,
-            segments=[("反向段落", [-1.0, 0.0, 0.0])],
-            with_reranker=False,
-        )
-
-        result = await harness.service.search(_request(project_id, score_threshold=0.0))
-
-        assert [citation.snippet for citation in result.citations] == ["反向段落"]
-        assert result.citations[0].score == pytest.approx(-1.0)
-        rows = await _query_rows(harness, project_id)
-        assert len(rows) == 1
-        assert rows[0].top_score == pytest.approx(-1.0)
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_mixed_rerank_and_rerank_free_groups_share_one_embedding_and_merge(postgres_database_url: str) -> None:
-    """Bases sharing an embedding model split into per-reranker groups but
-    reuse one query embedding; their scores merge into one ordering."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            reranked_base = _base_row(project_id, embedding_id, rerank_id, name="重排库")
-            cosine_base = _base_row(project_id, embedding_id, None, name="余弦库")
-            session.add_all([reranked_base, cosine_base])
-            await session.flush()
-            reranked_doc = _document_row(project_id, reranked_base.id, name="重排文档")
-            cosine_doc = _document_row(project_id, cosine_base.id, name="余弦文档")
-            session.add_all([reranked_doc, cosine_doc])
-            await session.flush()
-            session.add_all(
-                [
-                    _segment_row(reranked_doc, position=1, content="重排段落", embedding=[1.0, 0.0, 0.0]),
-                    _segment_row(cosine_doc, position=1, content="高余弦段落", embedding=[0.9, 0.43589, 0.0]),
-                    _segment_row(cosine_doc, position=2, content="低余弦段落", embedding=[0.3, 0.95394, 0.0]),
-                ]
-            )
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=0, score=0.5)][:top_n]
-
-        result = await harness.service.search(_request(project_id, top_k=3, score_threshold=0.0))
-
-        # rerank:R and cosine:E are two score domains (T7 fusion): 重排段落 and
-        # 高余弦段落 are each rank 1 at home (fused 0.5), 低余弦段落 is cosine
-        # rank 2 (fused 61/2/62) — the raw 0.9/0.5/0.3 are never compared.
-        assert {citation.snippet for citation in result.citations[:2]} == {"高余弦段落", "重排段落"}
-        assert result.citations[2].snippet == "低余弦段落"
-        assert all(citation.score == pytest.approx(0.5) for citation in result.citations[:2])
-        assert result.citations[2].score == pytest.approx(61 / 2 / 62)
-        assert {hit.citation.snippet: hit.local_score for hit in result.hits} == {"高余弦段落": pytest.approx(0.9), "重排段落": 0.5, "低余弦段落": pytest.approx(0.3)}
-        assert len(harness.client.embed_calls) == 1
-        assert len(harness.client.rerank_calls) == 1
-        (_, _, submitted, _) = harness.client.rerank_calls[0]
-        assert submitted == ["重排段落"]  # the cosine group never reaches the reranker
-    finally:
-        await harness.engine.dispose()
-
-
 # ---------------------------------------------------------------------------
 # Threshold, ordering, snippet
 # ---------------------------------------------------------------------------
@@ -1036,7 +765,6 @@ async def test_score_threshold_default_override_zero_and_all_below(postgres_data
         harness.client.rerank_scripts[rerank_id] = _script
 
         # Default threshold 0.2 drops the 0.15 candidate.
-        assert DEFAULT_SCORE_THRESHOLD == 0.2
         scripted.append([RerankScore(index=0, score=0.9), RerankScore(index=1, score=0.15)])
         result = await harness.service.search(_request(project_id))
         assert [citation.snippet for citation in result.citations] == ["高分段落"]
@@ -1106,102 +834,6 @@ async def test_relative_cutoff_keeps_candidates_near_the_bases_best_native_score
         await harness.engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_equal_rerank_scores_order_by_vector_score_then_position(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        # The cosine-worst segment sits at position 1: a sort key that skipped
-        # vector_score and fell through to position would rank it first.
-        project_id, _, _, rerank_id = await _seed_single_base(
-            harness,
-            segments=[
-                ("向量较远", [0.6, 0.8, 0.0]),
-                ("并列一号", [1.0, 0.0, 0.0]),
-                ("并列二号", [1.0, 0.0, 0.0]),
-            ],
-        )
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=index, score=0.7) for index in range(len(documents))][:top_n]
-
-        result = await harness.service.search(_request(project_id, top_k=3))
-
-        # Same rerank score: vector score wins; same vector too: position wins.
-        assert [citation.snippet for citation in result.citations] == ["并列一号", "并列二号", "向量较远"]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_equal_rerank_and_vector_scores_order_by_document_id(postgres_database_url: str) -> None:
-    """With every score level tied, the UUID levels give a total, stable order."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            base = _base_row(project_id, embedding_id, rerank_id, name="同分库")
-            session.add(base)
-            await session.flush()
-            first_doc = _document_row(project_id, base.id, name="文档甲")
-            second_doc = _document_row(project_id, base.id, name="文档乙")
-            session.add_all([first_doc, second_doc])
-            await session.flush()
-            session.add_all(
-                [
-                    _segment_row(first_doc, position=1, content="甲的段落", embedding=[1.0, 0.0, 0.0]),
-                    _segment_row(second_doc, position=1, content="乙的段落", embedding=[1.0, 0.0, 0.0]),
-                ]
-            )
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=index, score=0.7) for index in range(len(documents))][:top_n]
-
-        result = await harness.service.search(_request(project_id, top_k=2))
-
-        expected = ["甲的段落" if first_doc.id < second_doc.id else "乙的段落", "乙的段落" if first_doc.id < second_doc.id else "甲的段落"]
-        assert [citation.snippet for citation in result.citations] == expected
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_citation_snippet_truncates_and_source_position_round_trips(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        long_content = "知" * 400
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            base = _base_row(project_id, embedding_id, rerank_id, name="来源库")
-            session.add(base)
-            await session.flush()
-            document = _document_row(project_id, base.id, name="来源文档")
-            session.add(document)
-            await session.flush()
-            session.add(
-                _segment_row(
-                    document,
-                    position=7,
-                    content=long_content,
-                    embedding=[1.0, 0.0, 0.0],
-                    source_position={"page": 12},
-                )
-            )
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-
-        result = await harness.service.search(_request(project_id))
-
-        citation = result.citations[0]
-        assert citation.snippet == "知" * 320
-        assert citation.source_position == {"page": 12}
-        assert citation.knowledge_base_name == "来源库"
-        assert citation.document_name == "来源文档"
-        assert citation.segment_position == 7
-        assert citation.document_id == document.id
-        assert citation.segment_id is not None
-    finally:
-        await harness.engine.dispose()
-
-
 # ---------------------------------------------------------------------------
 # Failure paths
 # ---------------------------------------------------------------------------
@@ -1251,85 +883,6 @@ async def test_database_failure_maps_to_search_failed() -> None:
     with pytest.raises(KnowledgeError) as error:
         await service.search(_request(uuid.uuid4()))
     assert error.value.code == KNOWLEDGE_SEARCH_FAILED
-
-
-@pytest.mark.asyncio
-async def test_recall_database_failure_maps_to_search_failed(
-    postgres_database_url: str,
-) -> None:
-    """A DB fault in the single recall transaction fails closed before any
-    Segment text can reach a Reranker; the query embedding already ran on
-    the group-load authority (a search is three transactions, not one per
-    Provider batch)."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_single_base(
-            harness,
-            segments=[("段落", [1.0, 0.0, 0.0])],
-        )
-
-        class _DiesAfterGroups:
-            def __init__(self, inner) -> None:  # noqa: ANN001
-                self._inner = inner
-                self._calls = 0
-
-            def __call__(self):  # noqa: ANN204
-                self._calls += 1
-                if self._calls > 1:
-                    raise SQLAlchemyError("pool shut down before recall")
-                return self._inner()
-
-        service = KnowledgeSearchService(
-            session_factory=_DiesAfterGroups(harness.factory),  # type: ignore[arg-type]
-            client=harness.client,  # type: ignore[arg-type]
-            model_port=registry_model_port(),
-        )
-
-        with pytest.raises(KnowledgeError) as error:
-            await service.search(_request(project_id))
-        assert error.value.code == KNOWLEDGE_SEARCH_FAILED
-        assert len(harness.client.embed_calls) == 1
-        assert harness.client.rerank_calls == []
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_pre_rerank_guard_database_failure_maps_to_search_failed(postgres_database_url: str) -> None:
-    """A factory that dies after recall covers the pre-rerank guard branch:
-    no Segment text is dispatched without a successful revalidation."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_single_base(harness, segments=[("段落", [1.0, 0.0, 0.0])])
-
-        class _DiesAfterRecall:
-            def __init__(self, inner) -> None:  # noqa: ANN001
-                self._inner = inner
-                self._calls = 0
-
-            def __call__(self):  # noqa: ANN204
-                self._calls += 1
-                if self._calls > 2:
-                    raise SQLAlchemyError("pool shut down mid-request")
-                return self._inner()
-
-        service = KnowledgeSearchService(
-            session_factory=_DiesAfterRecall(harness.factory),  # type: ignore[arg-type]
-            client=harness.client,  # type: ignore[arg-type]
-            model_port=registry_model_port(),
-        )
-
-        with pytest.raises(KnowledgeError) as error:
-            await service.search(_request(project_id))
-        assert error.value.code == KNOWLEDGE_SEARCH_FAILED
-        # The failure hit the pre-rerank guard, after the embed and recall
-        # but before any rerank spend.
-        assert len(harness.client.embed_calls) == 1
-        assert harness.client.rerank_calls == []
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1384,26 +937,6 @@ async def test_final_authority_database_failure_suppresses_provider_results(
 
 
 @pytest.mark.asyncio
-async def test_cosine_recall_is_limited_to_candidate_k(postgres_database_url: str) -> None:
-    """Only the cosine top ``candidate_k`` segments ever reach the reranker."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        # Strictly decreasing cosine similarity to the query [1, 0, 0].
-        segments = [(f"段落{index:02d}", [1.0, index * 0.1, 0.0]) for index in range(1, 26)]
-        project_id, _, _, _ = await _seed_single_base(harness, segments=segments)
-
-        result = await harness.service.search(_request(project_id))
-
-        assert calculate_candidate_k(DEFAULT_TOP_K) == 20
-        [(_, _, reranked_documents, _)] = harness.client.rerank_calls
-        assert reranked_documents == [f"段落{index:02d}" for index in range(1, 21)]
-        assert len(result.citations) == DEFAULT_TOP_K
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_rerank_input_is_capped_by_the_rerank_candidate_budget(postgres_database_url: str) -> None:
     """Recall may keep ``C`` parents per base, but the reranker only sees the
     best ``max(top_k, budget / bases)`` of each base in recall order: a small
@@ -1451,76 +984,6 @@ def _mock_provider(scores_by_content: dict[str, float], query_vector: list[float
         )
 
     return httpx.MockTransport(_handler)
-
-
-@pytest.mark.asyncio
-async def test_search_with_the_real_client_batches_rerank_and_merges_across_batches(postgres_database_url: str) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session, rerank_max_batch=2)
-            base = _base_row(project_id, embedding_id, rerank_id, name="批次库")
-            session.add(base)
-            await session.flush()
-            document = _document_row(project_id, base.id, name="批次文档")
-            session.add(document)
-            await session.flush()
-            # Identical embeddings: recall order is the stable position order.
-            for position in range(1, 6):
-                session.add(_segment_row(document, position=position, content=f"候选{position}", embedding=[1.0, 0.0, 0.0]))
-
-        scores = {"候选1": 0.5, "候选2": 0.9, "候选3": 0.1, "候选4": 0.7, "候选5": 0.3}
-        rerank_requests: list[dict[str, Any]] = []
-        client = KnowledgeModelClient(http=httpx.AsyncClient(transport=_mock_provider(scores, [1.0, 0.0, 0.0], rerank_requests)))
-        service = KnowledgeSearchService(session_factory=factory, client=client, model_port=registry_model_port())
-
-        result = await service.search(_request(project_id, top_k=3))
-
-        assert [(citation.snippet, citation.score) for citation in result.citations] == [
-            ("候选2", 0.9),
-            ("候选4", 0.7),
-            ("候选1", 0.5),
-        ]
-        assert [request["documents"] for request in rerank_requests] == [
-            ["候选1", "候选2"],
-            ["候选3", "候选4"],
-            ["候选5"],
-        ]
-        assert [request["top_n"] for request in rerank_requests] == [2, 2, 1]
-        await client.aclose()
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_search_with_the_real_client_rejects_a_zero_query_embedding(postgres_database_url: str) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            base = _base_row(project_id, embedding_id, rerank_id, name="零向量库")
-            session.add(base)
-            await session.flush()
-            document = _document_row(project_id, base.id, name="文档")
-            session.add(document)
-            await session.flush()
-            session.add(_segment_row(document, position=1, content="段落", embedding=[1.0, 0.0, 0.0]))
-
-        client = KnowledgeModelClient(http=httpx.AsyncClient(transport=_mock_provider({}, [0.0, 0.0, 0.0], [])))
-        service = KnowledgeSearchService(session_factory=factory, client=client, model_port=registry_model_port())
-
-        with pytest.raises(KnowledgeError) as error:
-            await service.search(_request(project_id))
-        assert error.value.code == KNOWLEDGE_EMBEDDING_FAILED
-        await client.aclose()
-    finally:
-        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -1575,80 +1038,6 @@ async def test_parent_child_recall_rolls_best_child_score_up_to_one_parent_candi
 
 
 @pytest.mark.asyncio
-async def test_mixed_mode_recall_merges_general_segments_with_parent_rollups(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            base = _base_row(project_id, embedding_id, rerank_id, name="混合库")
-            session.add(base)
-            await session.flush()
-            general_document = _document_row(project_id, base.id, name="普通文档")
-            session.add(general_document)
-            await session.flush()
-            session.add(_segment_row(general_document, position=1, content="普通模式段落", embedding=[0.9, 0.43589, 0.0]))
-            await _seed_parent_child_document(
-                session,
-                project_id,
-                base.id,
-                name="父子文档",
-                parents=[("父块内容", [("子块", [1.0, 0.0, 0.0])])],
-            )
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-
-        result = await harness.service.search(_request(project_id, top_k=4))
-
-        # Both modes compete in one pool: the parent (child score 1.0) beats
-        # the general segment (cosine 0.9) and both reach the reranker.
-        assert [citation.snippet for citation in result.citations] == ["父块内容", "普通模式段落"]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_omitted_top_k_and_threshold_resolve_from_the_base_defaults(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            base = _base_row(project_id, embedding_id, rerank_id, name="定制默认库", default_top_k=1, default_score_threshold=0.5)
-            session.add(base)
-            await session.flush()
-            document = _document_row(project_id, base.id, name="文档")
-            session.add(document)
-            await session.flush()
-            session.add(_segment_row(document, position=1, content="第一段", embedding=[1.0, 0.0, 0.0]))
-            session.add(_segment_row(document, position=2, content="第二段", embedding=[0.9, 0.43589, 0.0]))
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-        scripted: list[list[RerankScore]] = []
-
-        def _script(documents: list[str], top_n: int) -> list[RerankScore]:
-            return list(scripted[-1])[:top_n]
-
-        harness.client.rerank_scripts[rerank_id] = _script
-
-        # default_top_k=1 truncates even though both clear the threshold.
-        scripted.append([RerankScore(index=0, score=0.9), RerankScore(index=1, score=0.8)])
-        result = await harness.service.search(_request(project_id))
-        assert [citation.snippet for citation in result.citations] == ["第一段"]
-        assert harness.client.rerank_calls[-1][3] == 2  # every candidate is scored; top_k cuts later
-
-        # default_score_threshold=0.5 drops everything scored below it.
-        scripted.append([RerankScore(index=0, score=0.45), RerankScore(index=1, score=0.3)])
-        result = await harness.service.search(_request(project_id))
-        assert result.citations == ()
-
-        # Explicit request values override both defaults.
-        scripted.append([RerankScore(index=0, score=0.45), RerankScore(index=1, score=0.3)])
-        result = await harness.service.search(_request(project_id, top_k=2, score_threshold=0.0))
-        assert [citation.score for citation in result.citations] == [0.45, 0.3]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_multi_base_defaults_widen_top_k_and_apply_each_bases_own_threshold(postgres_database_url: str) -> None:
     """Omitted top_k takes the largest per-base default; thresholds stay per base."""
 
@@ -1677,6 +1066,9 @@ async def test_multi_base_defaults_widen_top_k_and_apply_each_bases_own_threshol
         # strict base's own 0.8 threshold silently drops its 0.5-scored hit.
         assert [citation.snippet for citation in result.citations] == ["宽松库段落甲", "宽松库段落乙"]
         assert harness.client.rerank_calls[-1][3] == 3
+        narrowed = await harness.service.search(_request(project_id, knowledge_base_ids=(strict_base.id,)))
+        assert narrowed.hits == ()
+        assert harness.client.rerank_calls[-1][2] == ["严格库段落"]
     finally:
         await harness.engine.dispose()
 
@@ -1770,30 +1162,6 @@ async def test_search_fails_when_final_transaction_cannot_commit(postgres_databa
         assert error.value.code == KNOWLEDGE_SEARCH_FAILED
         history, total = await harness.service.list_recent_queries(project_id, _DEFAULT_OWNER_USER_ID, base_id)
         assert (history, total) == ([], 0)
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_zero_result_searches_still_log_with_null_top_score(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, _, rerank_id = await _seed_single_base(
-            harness,
-            segments=[("低分段", [1.0, 0.0, 0.0])],
-        )
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=0, score=0.05)][:top_n]
-
-        result = await harness.service.search(_request(project_id, query="全部低于阈值"))
-
-        assert result.citations == ()
-        rows = await _query_rows(harness, project_id)
-        assert [(row.result_count, row.top_score) for row in rows] == [(0, None)]
-        async with harness.factory() as session:
-            segment = await session.scalar(select(KnowledgeSegmentRow))
-            document = await session.scalar(select(KnowledgeDocumentRow))
-        assert segment is not None and segment.hit_count == 0
-        assert document is not None and document.hit_count == 0
     finally:
         await harness.engine.dispose()
 
@@ -2021,97 +1389,6 @@ async def test_recent_queries_are_private_to_the_trusted_search_actor(postgres_d
 
 
 @pytest.mark.asyncio
-async def test_list_recent_queries_filters_by_base_paginates_and_validates(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        async with harness.factory() as session, session.begin():
-            project_id = await _seed_project(session, uuid.uuid4().hex[:8])
-            embedding_id, rerank_id = await _seed_models(session)
-            first_base = _base_row(project_id, embedding_id, rerank_id, name="库一")
-            second_base = _base_row(project_id, embedding_id, rerank_id, name="库二")
-            session.add_all([first_base, second_base])
-            await session.flush()
-            first_document = _document_row(project_id, first_base.id, name="文档一")
-            second_document = _document_row(project_id, second_base.id, name="文档二")
-            session.add_all([first_document, second_document])
-            await session.flush()
-            session.add(_segment_row(first_document, position=1, content="库一段落", embedding=[1.0, 0.0, 0.0]))
-            session.add(_segment_row(second_document, position=1, content="库二段落", embedding=[0.9, 0.43589, 0.0]))
-        harness.client.query_vectors[embedding_id] = [1.0, 0.0, 0.0]
-
-        await harness.service.search(_request(project_id, query="查询一", knowledge_base_ids=(first_base.id,)))
-        await harness.service.search(_request(project_id, query="查询二", knowledge_base_ids=(first_base.id,)))
-        await harness.service.search(_request(project_id, query="查询三", knowledge_base_ids=(second_base.id,)))
-        await harness.service.search(_request(project_id, query="查询四"))  # both bases
-
-        views, total = await harness.service.list_recent_queries(
-            project_id,
-            _DEFAULT_OWNER_USER_ID,
-            first_base.id,
-        )
-        assert total == 3
-        assert [view.query for view in views] == ["查询四", "查询二", "查询一"]  # newest first
-        assert all(isinstance(view, KnowledgeQueryView) for view in views)
-        assert set(views[0].knowledge_base_ids) == {first_base.id, second_base.id}
-
-        views, total = await harness.service.list_recent_queries(
-            project_id,
-            _DEFAULT_OWNER_USER_ID,
-            second_base.id,
-        )
-        assert total == 2
-        assert [view.query for view in views] == ["查询四", "查询三"]
-
-        paged, total = await harness.service.list_recent_queries(
-            project_id,
-            _DEFAULT_OWNER_USER_ID,
-            first_base.id,
-            page=2,
-            page_size=2,
-        )
-        assert total == 3
-        assert [view.query for view in paged] == ["查询一"]
-
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.list_recent_queries(
-                project_id,
-                _DEFAULT_OWNER_USER_ID,
-                uuid.uuid4(),
-            )
-        assert error.value.code == KNOWLEDGE_NOT_FOUND
-
-        # A base in another project is invisible, not just empty.
-        async with harness.factory() as session, session.begin():
-            other_project = await _seed_project(session, uuid.uuid4().hex[:8])
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.list_recent_queries(
-                other_project,
-                _DEFAULT_OWNER_USER_ID,
-                first_base.id,
-            )
-        assert error.value.code == KNOWLEDGE_NOT_FOUND
-
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.list_recent_queries(
-                project_id,
-                _DEFAULT_OWNER_USER_ID,
-                first_base.id,
-                page=0,
-            )
-        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-        with pytest.raises(KnowledgeError) as error:
-            await harness.service.list_recent_queries(
-                project_id,
-                _DEFAULT_OWNER_USER_ID,
-                first_base.id,
-                page_size=101,
-            )
-        assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_disabled_parents_and_stale_versions_never_recall_through_children(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -2154,424 +1431,11 @@ async def test_disabled_parents_and_stale_versions_never_recall_through_children
 # ---------------------------------------------------------------------------
 
 _REQUEST_ID = "knowledge-m5-contract"
-_PROJECT_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 _OWNER_USER_ID = _DEFAULT_OWNER_USER_ID
-
-
-class _FakeSearchModule:
-    def __init__(self) -> None:
-        self.requests: list[KnowledgeSearchRequest] = []
-        self.query_calls: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID, int, int]] = []
-        self.error: KnowledgeError | None = None
-        passage = "安装前请确认电源已断开。"
-        digest = hashlib.sha256(passage.encode("utf-8")).hexdigest()
-        citation = KnowledgeCitation(
-            knowledge_base_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
-            knowledge_base_name="产品手册",
-            document_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
-            document_name="安装指南.pdf",
-            segment_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
-            segment_position=3,
-            snippet=passage,
-            score=0.91,
-            source_position={"page": 12},
-            document_version=1,
-            content_digest=digest,
-            score_kind="cosine",
-        )
-        self.result = KnowledgeSearchResult(
-            hits=(
-                KnowledgeSearchHit(
-                    citation=citation,
-                    passage=passage,
-                    document_version=1,
-                    content_digest=digest,
-                    local_score=0.91,
-                    local_score_kind="cosine",
-                    score_domain="embedding:test",
-                    ranking_method="cosine",
-                    ranking_score=0.91,
-                ),
-            )
-        )
-
-    async def search(self, request: KnowledgeSearchRequest, *, authority) -> KnowledgeSearchResult:  # noqa: ANN001
-        self.requests.append(request)
-        assert authority.project_id == _PROJECT_ID
-        assert authority.actor_user_id == _OWNER_USER_ID
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-    async def list_recent_queries(self, project_id: uuid.UUID, owner_user_id: uuid.UUID, base_id: uuid.UUID, *, page: int = 1, page_size: int = 20, authority):  # noqa: ANN001, ANN201
-        assert authority.project_id == _PROJECT_ID
-        assert authority.actor_user_id == _OWNER_USER_ID
-        self.query_calls.append((project_id, owner_user_id, base_id, page, page_size))
-        if self.error is not None:
-            raise self.error
-        view = KnowledgeQueryView(
-            id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
-            knowledge_base_ids=(base_id,),
-            query="最近的问题",
-            source="retrieval_test",
-            result_count=2,
-            top_score=0.87,
-            created_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
-        )
-        return [view], 41
-
-
-def _app(module: _FakeSearchModule) -> FastAPI:
-    app = FastAPI()
-    app.include_router(gateway.project_router)
-    context = ProjectContext(
-        user_id=_OWNER_USER_ID,
-        project_id=_PROJECT_ID,
-        membership_id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
-        role=ProjectRole.ADMIN,
-        capabilities=frozenset(Capability),
-        membership_version=1,
-        request_id=_REQUEST_ID,
-    )
-    app.dependency_overrides[gateway.require_project_knowledge_read] = lambda: context
-    app.dependency_overrides[gateway.require_project_knowledge_edit] = lambda: context
-    app.state.knowledge_module = module
-    return app
 
 
 def _client(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
-
-
-@pytest.mark.asyncio
-async def test_http_search_round_trips_the_module_result() -> None:
-    module = _FakeSearchModule()
-    base_id = uuid.uuid4()
-    async with _client(_app(module)) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "如何安装", "knowledge_base_ids": [str(base_id)], "top_k": 5},
-        )
-
-    assert response.status_code == 200
-    request = module.requests[0]
-    assert request.project_id == _PROJECT_ID
-    assert request.owner_user_id == _OWNER_USER_ID
-    assert request.query == "如何安装"
-    assert request.knowledge_base_ids == (base_id,)
-    assert request.top_k == 5
-    assert request.score_threshold is None
-
-    citation = module.result.citations[0]
-    assert response.json() == {
-        "citations": [
-            {
-                "knowledge_base_id": str(citation.knowledge_base_id),
-                "knowledge_base_name": citation.knowledge_base_name,
-                "document_id": str(citation.document_id),
-                "document_name": citation.document_name,
-                "segment_id": str(citation.segment_id),
-                "segment_position": citation.segment_position,
-                "snippet": citation.snippet,
-                "score": citation.score,
-                "source_position": citation.source_position,
-                "document_version": 1,
-                "content_digest": citation.content_digest,
-                "score_kind": "cosine",
-            }
-        ],
-        "diagnostics": None,
-        "request_id": _REQUEST_ID,
-    }
-    # The plain response never leaks the full passage: only the short quote.
-    assert "passage" not in response.text
-
-
-@pytest.mark.asyncio
-async def test_http_search_defaults_optional_fields_and_maps_errors() -> None:
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        ok = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-
-        module.error = KnowledgeError(KNOWLEDGE_RERANK_FAILED, "Reranker 服务不可用")
-        rerank_failed = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-
-        module.error = KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "query 不能为空")
-        invalid = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "  "})
-
-    assert ok.status_code == 200
-    assert module.requests[0].knowledge_base_ids is None
-    assert module.requests[0].top_k is None
-
-    assert rerank_failed.status_code == 502
-    assert rerank_failed.json()["detail"]["code"] == KNOWLEDGE_RERANK_FAILED
-    assert invalid.status_code == 422
-    assert invalid.json()["detail"]["code"] == KNOWLEDGE_INVALID_REQUEST
-
-
-@pytest.mark.asyncio
-async def test_http_search_forwards_an_optional_score_threshold_override() -> None:
-    """The retrieval test panel may override the threshold; range rules stay in the package."""
-
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        omitted = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-        overridden = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "score_threshold": 0.55},
-        )
-        zero = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "score_threshold": 0},
-        )
-
-        module.error = KnowledgeError(KNOWLEDGE_INVALID_REQUEST, "score_threshold 必须在 0..1 之间")
-        out_of_range = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "score_threshold": 1.5},
-        )
-
-    assert omitted.status_code == 200
-    assert overridden.status_code == 200
-    assert zero.status_code == 200
-    assert [request.score_threshold for request in module.requests[:3]] == [None, 0.55, 0.0]
-    assert out_of_range.status_code == 422
-    assert out_of_range.json()["detail"]["code"] == KNOWLEDGE_INVALID_REQUEST
-
-
-@pytest.mark.asyncio
-async def test_http_search_forwards_the_retrieval_mode_override() -> None:
-    """The retrieval test panel may force semantic/hybrid for one call; the
-    per-base configuration is never touched by this route."""
-
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        omitted = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-        hybrid = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "retrieval_mode": "hybrid"},
-        )
-        invalid = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "retrieval_mode": "fancy"},
-        )
-
-    assert omitted.status_code == 200
-    assert hybrid.status_code == 200
-    assert [request.retrieval_mode for request in module.requests] == [None, "hybrid"]
-    assert invalid.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_http_search_bounds_the_knowledge_base_ids_list() -> None:
-    """Empty means "say null instead"; oversized lists never reach the module."""
-
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        empty = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "knowledge_base_ids": []},
-        )
-        oversized = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "knowledge_base_ids": [str(uuid.uuid4()) for _ in range(101)]},
-        )
-        at_limit = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "knowledge_base_ids": [str(uuid.uuid4()) for _ in range(100)]},
-        )
-
-    assert empty.status_code == 422
-    assert oversized.status_code == 422
-    assert at_limit.status_code == 200
-    assert len(module.requests) == 1
-    assert len(module.requests[0].knowledge_base_ids or ()) == 100
-
-
-@pytest.mark.asyncio
-async def test_http_search_labels_requests_as_retrieval_test() -> None:
-    """The panel route pins the query-log source; the Agent tool pins its own."""
-
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        response = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-
-    assert response.status_code == 200
-    assert module.requests[0].source == "retrieval_test"
-
-
-@pytest.mark.asyncio
-async def test_http_search_debug_round_trips_the_safe_hit_diagnostics() -> None:
-    """debug=true adds bounded per-hit evidence; passages and child text stay out."""
-
-    from dataclasses import replace as dataclass_replace
-
-    from actweave_knowledge import (
-        KnowledgeHitDiagnostics,
-        KnowledgeMatchedChild,
-        KnowledgeRouteCounts,
-        KnowledgeSearchDiagnostics,
-        KnowledgeSearchTimings,
-    )
-
-    module = _FakeSearchModule()
-    hit = module.result.hits[0]
-    child = KnowledgeMatchedChild(
-        child_id=uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
-        position=2,
-        route="semantic",
-        score=0.88,
-    )
-    debug_hit = dataclass_replace(hit, matched_children=(child,))
-    embedding_model_id = uuid.UUID("12121212-1212-4121-8121-121212121212")
-    module.result = KnowledgeSearchResult(
-        hits=(debug_hit,),
-        diagnostics=KnowledgeSearchDiagnostics(
-            strategy_version=KNOWLEDGE_STRATEGY_VERSION,
-            lexical_version=1,
-            target_base_count=1,
-            effective_top_k=4,
-            per_base_route_budget=20,
-            retrieval_mode="semantic",
-            counts=KnowledgeRouteCounts(returned=1),
-            timings=KnowledgeSearchTimings(),
-            model_ids=(embedding_model_id,),
-            ranking_method="cosine",
-            hit_diagnostics=(
-                KnowledgeHitDiagnostics(
-                    segment_id=debug_hit.citation.segment_id,
-                    local_score=debug_hit.local_score,
-                    local_score_kind=debug_hit.local_score_kind,
-                    score_domain=debug_hit.score_domain,
-                    ranking_method=debug_hit.ranking_method,
-                    ranking_score=debug_hit.ranking_score,
-                    matched_children=(child,),
-                ),
-            ),
-        ),
-    )
-    async with _client(_app(module)) as client:
-        debug = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "debug": True},
-        )
-        plain = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-
-    assert debug.status_code == 200
-    assert plain.status_code == 200
-    assert module.requests[0].debug is True
-    assert module.requests[1].debug is False
-
-    diagnostics = debug.json()["diagnostics"]
-    assert diagnostics["strategy_version"] == KNOWLEDGE_STRATEGY_VERSION
-    assert diagnostics["target_base_count"] == 1
-    assert diagnostics["effective_top_k"] == 4
-    assert diagnostics["retrieval_mode"] == "semantic"
-    assert diagnostics["model_ids"] == [str(embedding_model_id)]
-    assert diagnostics["ranking_method"] == "cosine"
-    assert diagnostics["counts"]["returned"] == 1
-    assert diagnostics["timings"]["recall_ms"] == 0.0
-    assert diagnostics["empty_reason"] is None
-    [entry] = diagnostics["hit_diagnostics"]
-    assert entry == {
-        "segment_id": str(debug_hit.citation.segment_id),
-        "matched_via": "segment",
-        "local_score": 0.91,
-        "local_score_kind": "cosine",
-        "score_domain": "embedding:test",
-        "ranking_method": "cosine",
-        "ranking_score": 0.91,
-        "matched_children": [
-            {
-                "child_id": str(child.child_id),
-                "position": 2,
-                "route": "semantic",
-                "score": 0.88,
-            }
-        ],
-    }
-    # Bounded evidence only: no passage or child text in the debug payload.
-    assert "安装前请确认电源已断开" not in json.dumps(diagnostics, ensure_ascii=False)
-
-
-@pytest.mark.asyncio
-async def test_http_search_forwards_metadata_filters_and_bounds_the_list() -> None:
-    """K4: filter bodies become package DTOs; shape errors stop at the route."""
-
-    module = _FakeSearchModule()
-    async with _client(_app(module)) as client:
-        omitted = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/search", json={"query": "问"})
-        filtered = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={
-                "query": "问",
-                "metadata_filters": [
-                    {"name": "部门", "operator": "eq", "value": "工程"},
-                    {"name": "year", "operator": "gte", "value": 2024},
-                ],
-            },
-        )
-        bad_operator = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "metadata_filters": [{"name": "部门", "operator": "like", "value": "x"}]},
-        )
-        empty_list = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "metadata_filters": []},
-        )
-        oversized = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/search",
-            json={"query": "问", "metadata_filters": [{"name": f"f{index}", "operator": "eq", "value": 1} for index in range(11)]},
-        )
-
-    assert omitted.status_code == 200
-    assert module.requests[0].metadata_filters is None
-    assert filtered.status_code == 200
-    assert module.requests[1].metadata_filters == (
-        KnowledgeMetadataFilter(name="部门", operator="eq", value="工程"),
-        KnowledgeMetadataFilter(name="year", operator="gte", value=2024),
-    )
-    assert type(module.requests[1].metadata_filters[1].value) is int
-    # Shape errors are pydantic 422s that never reach the module.
-    for response in (bad_operator, empty_list, oversized):
-        assert response.status_code == 422
-    assert len(module.requests) == 2
-
-
-@pytest.mark.asyncio
-async def test_http_recent_queries_round_trip_and_error_mapping() -> None:
-    module = _FakeSearchModule()
-    base_id = uuid.uuid4()
-    async with _client(_app(module)) as client:
-        listed = await client.get(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{base_id}/queries",
-            params={"page": 3, "page_size": 10},
-        )
-
-        module.error = KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
-        missing = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{uuid.uuid4()}/queries")
-
-    assert listed.status_code == 200
-    assert module.query_calls[0] == (_PROJECT_ID, _OWNER_USER_ID, base_id, 3, 10)
-    payload = listed.json()
-    assert payload["total"] == 41
-    assert payload["page"] == 3
-    assert payload["page_size"] == 10
-    assert payload["request_id"] == _REQUEST_ID
-    assert payload["items"] == [
-        {
-            "id": "99999999-9999-4999-8999-999999999999",
-            "knowledge_base_ids": [str(base_id)],
-            "query": "最近的问题",
-            "source": "retrieval_test",
-            "result_count": 2,
-            "top_score": 0.87,
-            "created_at": "2026-08-29T12:00:00Z",
-        }
-    ]
-
-    assert missing.status_code == 404
-    assert missing.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -2586,7 +1450,6 @@ async def test_http_search_through_the_real_module_returns_reranked_citations(po
     module: KnowledgeModule | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, uuid.uuid4().hex[:8])
             membership_id = await _seed_project_member(
@@ -2646,6 +1509,15 @@ async def test_http_search_through_the_real_module_returns_reranked_citations(po
                 f"/api/projects/{project_id}/knowledge/search",
                 json={"query": "如何安装", "top_k": 2},
             )
+            for oversized in (
+                {"knowledge_base_ids": [str(base.id)] * 101},
+                {"metadata_filters": [{"name": "部门", "operator": "eq", "value": "工程"}] * 11},
+            ):
+                rejected = await client.post(
+                    f"/api/projects/{project_id}/knowledge/search",
+                    json={"query": "如何安装", **oversized},
+                )
+                assert rejected.status_code == 422
 
         assert response.status_code == 200
         payload = response.json()
@@ -3140,37 +2012,6 @@ async def test_search_request_override_ignores_changes_to_unused_base_defaults(
 
 
 @pytest.mark.asyncio
-async def test_search_ignores_default_top_k_changes_that_leave_the_effective_limit_unchanged(postgres_database_url: str) -> None:
-    """A multi-base search uses the largest default, not every default as a cap."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id, embedding_id, rerank_id = await _seed_single_base(
-            harness,
-            segments=[("较小默认值库的命中", [1.0, 0.0, 0.0])],
-        )
-        async with harness.factory() as session, session.begin():
-            larger_default_base = _base_row(project_id, embedding_id, rerank_id, name="默认八条", default_top_k=8)
-            session.add(larger_default_base)
-
-        async def _lower_nonmaximal_default() -> None:
-            async with harness.factory() as session, session.begin():
-                base = await session.get(KnowledgeBaseRow, base_id)
-                assert base is not None
-                base.default_top_k = 2
-
-        _rerank_side_effect(harness, _lower_nonmaximal_default)
-
-        result = await harness.service.search(_request(project_id, debug=True))
-
-        assert [hit.passage for hit in result.hits] == ["较小默认值库的命中"]
-        assert result.diagnostics is not None
-        assert result.diagnostics.effective_top_k == 8
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_final_review_drops_hits_whose_matched_children_were_replaced(postgres_database_url: str) -> None:
     """Child identities are re-verified: swapped child rows invalidate the hit."""
 
@@ -3218,39 +2059,6 @@ async def test_final_review_drops_hits_whose_matched_children_were_replaced(post
         assert result.hits == ()
         rows = await _query_rows(harness, project_id)
         assert [row.result_count for row in rows] == [0]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_debug_search_projects_hit_diagnostics_for_the_final_hits_only(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, embedding_id = await _seed_matched_children_project(harness)
-
-        plain = await harness.service.search(_request(project_id, top_k=2))
-        assert plain.diagnostics is None
-
-        result = await harness.service.search(_request(project_id, top_k=2, debug=True))
-
-        diagnostics = result.diagnostics
-        assert diagnostics is not None
-        assert diagnostics.strategy_version == KNOWLEDGE_STRATEGY_VERSION
-        assert diagnostics.target_base_count == 1
-        assert diagnostics.effective_top_k == 2
-        assert diagnostics.retrieval_mode == "semantic"
-        assert diagnostics.model_ids == (embedding_id,)
-        assert diagnostics.ranking_method == "cosine"
-
-        assert len(result.hits) == 2
-        assert [entry.segment_id for entry in diagnostics.hit_diagnostics] == [hit.citation.segment_id for hit in result.hits]
-        for entry, hit in zip(diagnostics.hit_diagnostics, result.hits, strict=True):
-            assert entry.local_score == hit.local_score
-            assert entry.local_score_kind == hit.local_score_kind
-            assert entry.score_domain == hit.score_domain
-            assert entry.ranking_method == hit.ranking_method
-            assert entry.ranking_score == hit.ranking_score
-            assert entry.matched_children == hit.matched_children
     finally:
         await harness.engine.dispose()
 

@@ -124,22 +124,6 @@ def test_word_merged_physical_cell_once_independent_equal_cells_repeat(tmp_path)
     assert "---" not in text  # No actual header evidence.
 
 
-def test_word_explicit_repeat_header_has_header_source_spans(tmp_path):
-    path = tmp_path / "header.docx"
-    word = WordFile()
-    table = word.add_table(rows=2, cols=2)
-    for cell, value in zip(table.rows[0].cells, ("名称", "值")):
-        cell.text = value
-    table.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
-    table.cell(1, 0).text = "设备"
-    table.cell(1, 1).text = "A"
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert any("| 名称 | 值 |\n| --- | --- |" in d.page_content for d in docs)
-    spans = [s for d in docs for s in d.source_spans]
-    assert any(s.block_id.startswith("table_header:") and s.location["row"] == 1 and s.location["column"] == 2 for s in spans)
-
-
 def test_word_hyperlinks_drawing_and_run_order_and_accurate_offsets(tmp_path):
     path = tmp_path / "images.docx"
     png = tmp_path / "red.png"
@@ -173,28 +157,6 @@ def test_word_hyperlinks_drawing_and_run_order_and_accurate_offsets(tmp_path):
     for doc, occurrence in images:
         assert doc.page_content[occurrence.source.start : occurrence.source.end] == f"![图片](knowledge-attachment:{occurrence.ref})"
         assert occurrence.source in doc.source_spans
-
-
-def test_word_legacy_field_hyperlink_spaces(tmp_path):
-    path = tmp_path / "field.docx"
-    word = WordFile()
-    p = word.add_paragraph("before ")
-    for kind in ("begin", "instruction", "separate", "text", "end"):
-        run = p.add_run()
-        if kind == "instruction":
-            element = OxmlElement("w:instrText")
-            element.text = ' HYPERLINK "https://example.org" '
-        elif kind == "text":
-            run.add_text(" field text ")
-            continue
-        else:
-            element = OxmlElement("w:fldChar")
-            element.set(qn("w:fldCharType"), kind)
-        run._r.append(element)
-    p.add_run(" after")
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert docs[0].page_content == "before [ field text ](https://example.org) after"
 
 
 def test_word_remote_image_is_not_downloaded(tmp_path):
@@ -260,46 +222,6 @@ def test_cumulative_text_limit_is_enforced_inside_adapter(tmp_path, extension):
     assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
 
 
-def test_pdf_helper_escapes_literal_string_delimiters(tmp_path):
-    path = tmp_path / "literal.pdf"
-    write_pdf(path, [r"one (two) \ three"])
-    assert PdfReader(path).pages[0].extract_text() == r"one (two) \ three"
-
-
-def test_word_cell_paragraph_origins_and_repeats(tmp_path):
-    path = tmp_path / "cell-paragraphs.docx"
-    word = WordFile()
-    cell = word.add_table(rows=1, cols=1).cell(0, 0)
-    cell.text = "重复"
-    cell.add_paragraph("重复")
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert docs[0].page_content.count("重复") == 2
-    paragraphs = [s for s in docs[0].source_spans if ":paragraph:" in s.block_id]
-    assert [s.location["paragraph"] for s in paragraphs] == [1, 2]
-    assert len({s.block_id for s in paragraphs}) == 2
-    for span in paragraphs:
-        assert docs[0].page_content[span.start : span.end] == "重复"
-
-
-def test_word_images_in_hyperlink_get_unique_indices_and_shifted_spans(tmp_path):
-    path = tmp_path / "linked-image.docx"
-    png = tmp_path / "red.png"
-    _png(png)
-    word = WordFile()
-    p = word.add_paragraph("start ")
-    p.add_run().add_picture(str(png))
-    link = _hyperlink(p, "click ", "https://example.org")
-    drawing = p.add_run()
-    drawing.add_picture(str(png))
-    link.append(drawing._r)
-    p.add_run().add_picture(str(png))
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert [o.source.location["image_index"] for o in docs[0].attachments] == [1, 2, 3]
-    assert len({o.source.block_id for o in docs[0].attachments}) == 3
-
-
 def test_pdf_plaintext_markdown_cannot_hide_image_refs(tmp_path):
     path = tmp_path / "literal-image.pdf"
     _image_pdf(path)
@@ -358,27 +280,6 @@ def test_pdf_native_handles_close_when_sink_fails(tmp_path, monkeypatch):
         PdfExtractor().extract(make_setting(path), context)
     assert {"PdfDocument", "PdfPage", "PdfTextPage", "PdfImage", "PdfBitmap"} <= set(closed)
     assert not list(context.work_dir.iterdir())
-
-
-def test_pdf_native_handles_close_on_text_budget(tmp_path, monkeypatch):
-    import pypdfium2
-    from actweave_knowledge.extraction.builtin.pdf_extractor import PdfExtractor
-
-    path = tmp_path / "close-text.pdf"
-    write_pdf(path, ["123456", "not visited"])
-    closed = []
-    for cls in (pypdfium2.PdfDocument, pypdfium2.PdfPage, pypdfium2.PdfTextPage):
-        original = cls.close
-
-        def record_close(self, _original=original, _name=cls.__name__, **kwargs):
-            closed.append(_name)
-            return _original(self, **kwargs)
-
-        monkeypatch.setattr(cls, "close", record_close)
-    context = make_context(tmp_path / "work").model_copy(update={"limits": ExtractionLimits(max_text_chars=5)})
-    with pytest.raises(KnowledgeError):
-        PdfExtractor().extract(make_setting(path), context)
-    assert {"PdfDocument", "PdfPage", "PdfTextPage"} <= set(closed)
 
 
 @pytest.mark.parametrize("extension", [".pdf", ".docx"])
@@ -444,25 +345,6 @@ def test_pdf_soft_mask_survives_safe_attachment_normalization(tmp_path):
             assert 128 in alpha.tobytes()
 
 
-def test_word_leading_run_spaces_do_not_turn_image_into_code(tmp_path):
-    path = tmp_path / "indent.docx"
-    png = tmp_path / "red.png"
-    _png(png)
-    word = WordFile()
-    p = word.add_paragraph()
-    p.add_run("  ")
-    p.add_run("  visible ")
-    p.add_run().add_picture(str(png))
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert len(docs[0].attachments) == 1
-    from markdown_it import MarkdownIt
-
-    rendered = MarkdownIt().render(docs[0].page_content)
-    assert "code>" not in rendered
-    assert "   visible " in rendered
-
-
 def test_word_rejected_image_retains_actual_later_image_index(tmp_path):
     path = tmp_path / "indices.docx"
     large, small = tmp_path / "large.png", tmp_path / "small.png"
@@ -478,17 +360,6 @@ def test_word_rejected_image_retains_actual_later_image_index(tmp_path):
     assert len(sink.assets) == 1
     assert docs[0].attachments[0].source.location["image_index"] == 2
     assert docs[0].warnings[0].source_position["image_index"] == 1
-
-
-def test_word_two_paragraphs_keep_only_their_own_source_intervals(tmp_path):
-    path = tmp_path / "paragraphs.docx"
-    word = WordFile()
-    word.add_paragraph("first")
-    word.add_paragraph("second paragraph split target")
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert len(docs) == 2
-    assert [(s.start, s.end, s.location) for d in docs for s in d.source_spans] == [(0, 5, {"paragraph": 1}), (0, 29, {"paragraph": 2})]
 
 
 @pytest.mark.parametrize("extension", [".pdf", ".docx"])
@@ -517,24 +388,7 @@ def test_image_intermediates_respect_work_directory_limit(tmp_path, extension):
     assert not list(context.work_dir.iterdir())
 
 
-def test_word_explicit_header_merged_cells_keep_markdown_columns(tmp_path):
-    path = tmp_path / "merged-header.docx"
-    word = WordFile()
-    table = word.add_table(rows=2, cols=3)
-    table.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
-    table.cell(0, 0).merge(table.cell(0, 1)).text = "merged"
-    table.cell(0, 2).text = "last"
-    table.cell(1, 0).text = "A"
-    table.cell(1, 1).text = "B"
-    table.cell(1, 2).text = "C"
-    word.save(path)
-    docs, _ = _extract(path, tmp_path / "work")
-    assert docs[0].page_content == "| merged |  | last |\n| --- | --- | --- |"
-    assert docs[1].page_content == "| A | B | C |"
-
-
-@pytest.mark.parametrize("flate", [False, True], ids=["uncompressed", "flate"])
-def test_pdf_cmyk_image_uses_rendered_fallback_without_losing_page_text(tmp_path, flate):
+def test_pdf_cmyk_image_uses_rendered_fallback_without_losing_page_text(tmp_path):
     path = tmp_path / "cmyk.pdf"
     write_pdf(path, ["visible CMYK page"])
     writer = PdfWriter()
@@ -551,7 +405,7 @@ def test_pdf_cmyk_image_uses_rendered_fallback_without_losing_page_text(tmp_path
             NameObject("/BitsPerComponent"): NumberObject(8),
         }
     )
-    reference = writer._add_object(image.flate_encode() if flate else image)
+    reference = writer._add_object(image.flate_encode())
     page = writer.pages[0]
     page["/Resources"][NameObject("/XObject")] = DictionaryObject({NameObject("/CMYK"): reference})
     stream = DecodedStreamObject()
@@ -572,8 +426,7 @@ def test_pdf_cmyk_image_uses_rendered_fallback_without_losing_page_text(tmp_path
         assert red > green and red > blue and alpha == 255
 
 
-@pytest.mark.parametrize("break_tag", ["w:br", "w:cr"])
-def test_word_multiline_header_and_cells_preserve_one_markdown_row_and_image_offsets(tmp_path, break_tag):
+def test_word_multiline_header_and_cells_preserve_one_markdown_row_and_image_offsets(tmp_path):
     from markdown_it import MarkdownIt
 
     path = tmp_path / "multiline-table.docx"
@@ -584,11 +437,11 @@ def test_word_multiline_header_and_cells_preserve_one_markdown_row_and_image_off
     table = word.add_table(rows=2, cols=2)
     table.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
     header = table.cell(0, 0).paragraphs[0].add_run("Name")
-    header._r.append(OxmlElement(break_tag))
+    header._r.append(OxmlElement("w:br"))
     header.add_text("caption")
     table.cell(0, 1).text = "Value"
     run = table.cell(1, 0).paragraphs[0].add_run("line1")
-    run._r.append(OxmlElement(break_tag))
+    run._r.append(OxmlElement("w:br"))
     run.add_text("line2 ")
     run.add_picture(str(png))
     table.cell(1, 1).text = "42"

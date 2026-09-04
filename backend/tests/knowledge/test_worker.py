@@ -42,7 +42,6 @@ from app.projects.errors import ProjectDeletionStateConflict
 from app.projects.lifecycle_repository import ProjectLifecycleRepository
 from app.worker.retention import KnowledgePurgeIncomplete, RetentionPurgeJobHandler
 from app.worker.service import JobSettlement
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -61,7 +60,6 @@ class _Harness:
 async def _harness(postgres_database_url: str) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     return _Harness(engine, factory)
 
 

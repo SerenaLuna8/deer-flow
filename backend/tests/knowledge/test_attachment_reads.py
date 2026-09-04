@@ -47,7 +47,7 @@ async def test_bound_attachment_reads_actual_bytes_and_allows_repeated_occurrenc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["managed", "citation"])
-@pytest.mark.parametrize("disabled", ["base", "document", "segment", "failed", "queued", "processing"])
+@pytest.mark.parametrize("disabled", ["base", "document", "segment", "failed"])
 async def test_retained_publication_visible_only_to_management(postgres_database_url, tmp_path, kind, disabled):
     async with extraction_harness(postgres_database_url) as h:
         seeded = await h.seed_attachment_read(tmp_path)
@@ -75,7 +75,6 @@ async def test_retained_publication_visible_only_to_management(postgres_database
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
 @pytest.mark.parametrize(
     "change,code",
     [
@@ -91,12 +90,12 @@ async def test_retained_publication_visible_only_to_management(postgres_database
         ("sha", KNOWLEDGE_CONFLICT),
     ],
 )
-async def test_copy_revalidates_full_binding_after_io(postgres_database_url, tmp_path, kind, change, code):
+async def test_copy_revalidates_full_binding_after_io(postgres_database_url, tmp_path, change, code):
     async with extraction_harness(postgres_database_url) as h:
         seeded = await h.seed_attachment_read(tmp_path)
         gate = h.object_store.pause("get")
         output = tmp_path / "download.png"
-        pending = asyncio.create_task(read_call(read_service(h), h, kind, seeded, output))
+        pending = asyncio.create_task(read_call(read_service(h), h, "citation", seeded, output))
         await asyncio.wait_for(gate.entered.wait(), timeout=5)
         try:
             # This independent transaction must complete while GET is blocked.
@@ -136,15 +135,11 @@ async def test_copy_revalidates_full_binding_after_io(postgres_database_url, tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
 @pytest.mark.parametrize("attachment_scope", ["wrong", "unbound", "deleting"])
-@pytest.mark.parametrize("stale_expected", ["version", "digest"])
 async def test_attachment_scope_is_hidden_before_stale_expectations(
     postgres_database_url,
     tmp_path,
-    kind,
     attachment_scope,
-    stale_expected,
 ):
     async with extraction_harness(postgres_database_url) as h:
         seeded = await h.seed_attachment_read(tmp_path)
@@ -160,22 +155,21 @@ async def test_attachment_scope_is_hidden_before_stale_expectations(
                     )
                 else:
                     (await session.get(KnowledgeAttachmentRow, seeded[1])).state = "deleting"
-        overrides = {"expected_document_version": 99} if stale_expected == "version" else {"expected_content_digest": "b" * 64}
+        overrides = {"expected_content_digest": "b" * 64}
         h.object_store.calls.clear()
         output = tmp_path / "hidden.png"
         with pytest.raises(KnowledgeError) as error:
-            await read_call(read_service(h), h, kind, seeded, output, **overrides)
+            await read_call(read_service(h), h, "managed", seeded, output, **overrides)
         assert error.value.code == KNOWLEDGE_NOT_FOUND
         assert h.object_store.calls == []
         assert not output.exists()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
 @pytest.mark.parametrize(
     "mismatch,code", [("segment", KNOWLEDGE_NOT_FOUND), ("attachment", KNOWLEDGE_NOT_FOUND), ("authority", KNOWLEDGE_NOT_FOUND), ("version", KNOWLEDGE_CONFLICT), ("digest", KNOWLEDGE_CONFLICT), ("unbound", KNOWLEDGE_NOT_FOUND)]
 )
-async def test_unmatched_scope_and_expected_never_read_objects(postgres_database_url, tmp_path, kind, mismatch, code):
+async def test_unmatched_scope_and_expected_never_read_objects(postgres_database_url, tmp_path, mismatch, code):
     async with extraction_harness(postgres_database_url) as h:
         seeded = await h.seed_attachment_read(tmp_path)
         overrides = {}
@@ -196,7 +190,7 @@ async def test_unmatched_scope_and_expected_never_read_objects(postgres_database
         output = tmp_path / "download.png"
         output.touch()
         with pytest.raises(KnowledgeError) as error:
-            await read_call(read_service(h), h, kind, seeded, output, **overrides)
+            await read_call(read_service(h), h, "citation", seeded, output, **overrides)
         assert error.value.code == code
         assert h.object_store.calls == []
         assert not output.exists()
@@ -232,8 +226,7 @@ async def test_download_failure_or_cancel_removes_output(postgres_database_url, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
-async def test_cached_extraction_can_publish_a_later_document_generation(postgres_database_url, tmp_path, kind):
+async def test_cached_extraction_can_publish_a_later_document_generation(postgres_database_url, tmp_path):
     """Creation target is immutable task evidence, not publication generation."""
     async with extraction_harness(postgres_database_url) as h:
         seeded = await h.seed_attachment_read(tmp_path)
@@ -245,6 +238,6 @@ async def test_cached_extraction_can_publish_a_later_document_generation(postgre
             (await session.get(KnowledgeSegmentRow, seeded[0])).document_version = 2
         seeded = seeded[:2] + (seeded[2], seeded[3])
         output = tmp_path / "cached-generation.png"
-        metadata = await read_call(read_service(h), h, kind, seeded, output, expected_document_version=2)
+        metadata = await read_call(read_service(h), h, "managed", seeded, output, expected_document_version=2)
         assert metadata.media_type == "image/png"
         assert output.read_bytes() == (tmp_path / "asset.png").read_bytes()

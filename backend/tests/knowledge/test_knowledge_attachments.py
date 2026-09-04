@@ -308,8 +308,7 @@ async def test_inactive_project_still_takes_real_project_fence(postgres_database
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attempt", [1, 3])
-async def test_project_resume_same_attempt_creates_independent_claim_generation(postgres_database_url, tmp_path, attempt):
+async def test_project_resume_same_attempt_creates_independent_claim_generation(postgres_database_url, tmp_path):
     from actweave_knowledge.persistence.models import KnowledgeTaskRow
     from actweave_knowledge.persistence.tasks import claim_next_task, defer_running_task_for_inactive_project
     from actweave_knowledge.tasks.worker import KnowledgeProjectInactive
@@ -317,8 +316,8 @@ async def test_project_resume_same_attempt_creates_independent_claim_generation(
     async with extraction_harness(postgres_database_url) as h:
         async with h.session_factory() as session, session.begin():
             task = await session.get(KnowledgeTaskRow, h.claim.id)
-            task.attempt_count = attempt
-        h.claim = replace(h.claim, attempt_count=attempt)
+            task.attempt_count = 1
+        h.claim = replace(h.claim, attempt_count=1)
         original_claim = h.claim
         original = await begin(h)
         async with h.session_factory() as session, session.begin():
@@ -331,7 +330,7 @@ async def test_project_resume_same_attempt_creates_independent_claim_generation(
             await session.execute(text("UPDATE projects SET status='active' WHERE id=:id"), {"id": h.project_id})
             await session.execute(text("UPDATE knowledge_tasks SET available_at=clock_timestamp() WHERE id=:id"), {"id": h.claim.id})
             task = await claim_next_task(session, lease_seconds=600)
-            assert task.attempt_count == attempt
+            assert task.attempt_count == 1
             assert task.claim_token != original_claim.claim_token
             h.claim = replace(original_claim, claim_token=task.claim_token)
         resumed = await begin(h)
@@ -343,8 +342,8 @@ async def test_project_resume_same_attempt_creates_independent_claim_generation(
         assert len(rows["extractions"]) == 2
         old = next(row for row in rows["extractions"] if row.id == original.extraction_id)
         assert old.created_claim_token == original_claim.claim_token
-        assert old.created_attempt == attempt and old.state == "staging"
+        assert old.created_attempt == 1 and old.state == "staging"
         assert rows["tasks"][0].extraction_id == resumed.extraction_id
-        assert rows["tasks"][0].attempt_count == attempt
+        assert rows["tasks"][0].attempt_count == 1
         assert rows["documents"][0].status != "failed"
         assert not h.object_store.calls

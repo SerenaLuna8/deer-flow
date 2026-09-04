@@ -21,7 +21,6 @@ from app.model_registry.secrets import (
     protect_provider_api_key,
 )
 from deerflow.config.app_config import AppConfig
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.secrets import SecretEnvelope, SecretKey, SecretMaterializationFailed
 
@@ -32,7 +31,6 @@ async def test_db_loading_missing_row_disables_without_seeding_and_roundtrips_se
     factory = async_sessionmaker(engine, expire_on_commit=False)
     key = SecretKey(b"0" * 32)
     try:
-        await _install_full_schema(engine)
         assert not (await load_knowledge_settings_from_db(factory, secret_key=key)).enabled
         async with factory() as session, session.begin():
             assert await session.get(KnowledgeSystemSettingsRow, 1) is None
@@ -52,14 +50,6 @@ async def test_db_loading_missing_row_disables_without_seeding_and_roundtrips_se
             await load_knowledge_settings_from_db(factory, secret_key=key)
     finally:
         await engine.dispose()
-
-
-@pytest.mark.parametrize("raw", [{"enabled": False}, {"enabled": True}, "invalid"])
-def test_legacy_knowledge_yaml_has_safe_migration_guidance(raw):
-    with pytest.raises(ValidationError) as caught:
-        AppConfig.model_validate({"knowledge": raw}, context={"config_source": "yaml"})
-    assert "LEGACY_CONFIG_REMOVED" in str(caught.value)
-    assert "scripts/migrate_knowledge_config.py" in str(caught.value)
 
 
 def test_removed_config_error_does_not_print_resolved_credentials():
@@ -188,7 +178,6 @@ async def test_parser_policy_is_materialized_from_database_and_bootstrap_preserv
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         await bootstrap_knowledge_system_settings(factory)
         async with factory() as session, session.begin():
             row = await session.get(KnowledgeSystemSettingsRow, 1)

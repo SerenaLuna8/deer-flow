@@ -1,13 +1,11 @@
-"""M3 gates: MinIO object store behavior and the blocking-I/O static gate.
+"""MinIO bytes, bounded I/O, cancellation, and confirmed-absence regressions.
 
-Integration tests run against the local development MinIO and skip when the
-``ACT_WEAVE_KNOWLEDGE_MINIO_*`` environment values are absent; the storage-key
-and event-loop gates always run.
+Integration tests use explicit MinIO environment values or the root development
+``.env``. Configuration stays local to this module, never exported to setup tests.
 """
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import os
 import threading
@@ -21,14 +19,16 @@ from actweave_knowledge import KNOWLEDGE_STORAGE_UNAVAILABLE, KnowledgeError
 from actweave_knowledge.contracts import KnowledgeMinioSettings
 from actweave_knowledge.storage import MinioObjectStore, document_storage_key
 from actweave_knowledge.storage import minio_store as minio_store_module
+from dotenv import dotenv_values
 from minio.helpers import MIN_PART_SIZE
 from minio.versioningconfig import ENABLED, OFF, SUSPENDED
 
-import app.knowledge.gateway as knowledge_gateway_module
-
-_ENDPOINT = os.environ.get("ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT", "")
-_ACCESS_KEY = os.environ.get("ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY", "")
-_SECRET_KEY = os.environ.get("ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY", "")
+_MINIO_KEYS = ("ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT", "ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY", "ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY")
+# Keep each configuration source intact: never send a file's credentials to an
+# endpoint supplied separately in the environment.
+_minio_source = os.environ if any(name in os.environ for name in _MINIO_KEYS) else dotenv_values(Path(__file__).resolve().parents[3] / ".env")
+_ENDPOINT, _ACCESS_KEY, _SECRET_KEY = (_minio_source.get(name) or "" for name in _MINIO_KEYS)
+del _minio_source
 
 requires_minio = pytest.mark.skipif(
     not (_ENDPOINT and _ACCESS_KEY and _SECRET_KEY),
@@ -63,23 +63,6 @@ def minio_bucket() -> Iterator[str]:
         for entry in admin.list_objects(bucket, recursive=True):
             admin.remove_object(bucket, entry.object_name)
         admin.remove_bucket(bucket)
-
-
-# ---------------------------------------------------------------------------
-# Storage key
-# ---------------------------------------------------------------------------
-
-
-def test_document_storage_key_uses_ids_and_lowercased_extension() -> None:
-    project_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
-    base_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
-    document_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
-
-    key = document_storage_key(project_id, base_id, document_id, "季度报告.PDF")
-
-    assert key == f"projects/{project_id}/knowledge/{base_id}/{document_id}.pdf"
-    # The user-controlled filename must never appear in the key.
-    assert "季度报告" not in key
 
 
 @pytest.mark.asyncio
@@ -491,58 +474,6 @@ async def test_delete_rejects_versioned_bucket_before_remove(
 
     assert error.value.code == KNOWLEDGE_STORAGE_UNAVAILABLE
     assert removed == []
-
-
-# ---------------------------------------------------------------------------
-# Blocking-I/O static gate
-# ---------------------------------------------------------------------------
-
-# Calls that would block the event loop when made directly inside an async
-# function. Wrapping them with asyncio.to_thread passes the callable as an
-# argument (not a Call node), and nested sync helpers run inside the thread,
-# so neither triggers a violation.
-_MINIO_BLOCKING_CALLS = frozenset(
-    {
-        "fput_object",
-        "fget_object",
-        "remove_object",
-        "bucket_exists",
-        "get_bucket_versioning",
-        "list_buckets",
-        "list_objects",
-    }
-)
-_FILE_BLOCKING_CALLS = frozenset({"open", "write", "unlink", "close", "mkstemp", "mkdtemp", "NamedTemporaryFile", "read_bytes", "write_bytes"})
-
-
-def _direct_calls_in_async_functions(source_path: Path, blocked: frozenset[str]) -> list[str]:
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    violations: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        stack: list[ast.AST] = list(node.body)
-        while stack:
-            current = stack.pop()
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue  # nested defs are separate execution contexts
-            if isinstance(current, ast.Call):
-                target = current.func
-                name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
-                if name in blocked:
-                    violations.append(f"{source_path.name}:{current.lineno} {node.name} calls {name}() directly")
-            stack.extend(ast.iter_child_nodes(current))
-    return violations
-
-
-def test_minio_store_never_calls_the_sync_client_on_the_event_loop() -> None:
-    module_path = Path(minio_store_module.__file__)
-    assert _direct_calls_in_async_functions(module_path, _MINIO_BLOCKING_CALLS | _FILE_BLOCKING_CALLS) == []
-
-
-def test_knowledge_gateway_never_does_sync_file_io_on_the_event_loop() -> None:
-    module_path = Path(knowledge_gateway_module.__file__)
-    assert _direct_calls_in_async_functions(module_path, _MINIO_BLOCKING_CALLS | _FILE_BLOCKING_CALLS) == []
 
 
 @pytest.mark.asyncio

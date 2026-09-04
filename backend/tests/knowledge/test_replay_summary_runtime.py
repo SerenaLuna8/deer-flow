@@ -39,6 +39,9 @@ from deerflow.secrets import SecretKey
 
 @pytest.mark.asyncio
 async def test_replay_seed_and_summary_use_database_model_and_real_http(harness, postgres_database_url, monkeypatch, tmp_path):  # noqa: F811 - imported fixture
+    monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=")
+    monkeypatch.setenv("ACT_WEAVE_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv("ACT_WEAVE_AUDIT_KEYRING_JSON", '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}')
     monkeypatch.setattr(validation, "PROVIDER_ADAPTERS", dict(validation.PROVIDER_ADAPTERS))
     for key in ("NO_PROXY", "no_proxy"):
         monkeypatch.setenv(key, os.environ.get(key, ""))

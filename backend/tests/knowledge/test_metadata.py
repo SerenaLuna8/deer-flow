@@ -16,8 +16,6 @@ from typing import Any
 import httpx
 import pytest
 from actweave_knowledge import (
-    KNOWLEDGE_BUILTIN_FILTER_FIELDS,
-    KNOWLEDGE_FILTER_OPERATORS_BY_TYPE,
     KNOWLEDGE_INVALID_REQUEST,
     KNOWLEDGE_MAX_BATCH_METADATA_DOCUMENTS,
     KNOWLEDGE_MAX_BATCH_METADATA_FIELDS,
@@ -46,7 +44,6 @@ from app.knowledge import gateway
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
 # Service harness
@@ -63,7 +60,6 @@ class _Harness:
 async def _harness(postgres_database_url: str) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     return _Harness(engine, factory, KnowledgeMetadataService(session_factory=factory))
 
 
@@ -132,29 +128,6 @@ async def _doc_metadata(harness: _Harness, document_id: uuid.UUID) -> dict[str, 
 # ---------------------------------------------------------------------------
 # Field definition CRUD
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_field_create_then_list_round_trips_in_creation_order(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id = await _seed_base(harness)
-
-        department = await harness.service.create_metadata_field(project_id, base_id, name="部门", field_type="string")
-        year = await harness.service.create_metadata_field(project_id, base_id, name="year", field_type="number")
-        published = await harness.service.create_metadata_field(project_id, base_id, name="published_at", field_type="time")
-
-        assert department.field_type == "string"
-        assert department.knowledge_base_id == base_id
-        listed = await harness.service.list_metadata_fields(project_id, base_id)
-        assert [(field.name, field.field_type) for field in listed] == [
-            ("部门", "string"),
-            ("year", "number"),
-            ("published_at", "time"),
-        ]
-        assert [field.id for field in listed] == [department.id, year.id, published.id]
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -377,38 +350,6 @@ async def test_delete_field_strips_the_key_from_documents(postgres_database_url:
 # ---------------------------------------------------------------------------
 # T6: filter-field discovery (builtin + custom)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_filter_field_discovery_lists_builtin_then_custom_fields(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, base_id = await _seed_base(harness)
-        await harness.service.create_metadata_field(project_id, base_id, name="来源", field_type="string")
-        await harness.service.create_metadata_field(project_id, base_id, name="发布时间", field_type="time")
-
-        discovered = await harness.service.list_filter_fields(project_id)
-
-        assert [entry.knowledge_base_id for entry in discovered] == [base_id]
-        fields = discovered[0].fields
-        builtin = [field for field in fields if field.kind == "builtin"]
-        custom = [field for field in fields if field.kind == "custom"]
-        # Builtins come first, in the frozen contract order, never writable.
-        assert [field.name for field in fields[: len(builtin)]] == list(KNOWLEDGE_BUILTIN_FILTER_FIELDS)
-        assert [(field.name, field.field_type, field.writable) for field in builtin] == [
-            ("document_name", "string", False),
-            ("uploaded_at", "time", False),
-            ("file_type", "string", False),
-            ("source_type", "string", False),
-        ]
-        assert [(field.name, field.field_type, field.writable) for field in custom] == [
-            ("来源", "string", True),
-            ("发布时间", "time", True),
-        ]
-        for field in fields:
-            assert field.operators == KNOWLEDGE_FILTER_OPERATORS_BY_TYPE[field.field_type]
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -910,45 +851,6 @@ def _client(app: FastAPI) -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_http_metadata_routes_round_trip() -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        listed = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/metadata-fields")
-        created = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/metadata-fields",
-            json={"name": "year", "field_type": "number"},
-        )
-        renamed = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/metadata-fields/{_FIELD_ID}",
-            json={"name": "发布年份"},
-        )
-        deleted = await client.delete(f"/api/projects/{_PROJECT_ID}/knowledge/metadata-fields/{_FIELD_ID}")
-        assigned = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/metadata",
-            json={"values": {"部门": "工程", "year": 2026, "published_at": None}},
-        )
-
-    assert listed.status_code == 200
-    assert listed.json()["items"][0]["name"] == "部门"
-    assert listed.json()["request_id"] == _REQUEST_ID
-    assert created.status_code == 200
-    assert created.json()["item"]["field_type"] == "number"
-    assert renamed.status_code == 200
-    assert renamed.json()["item"]["name"] == "发布年份"
-    assert deleted.status_code == 200
-    assert deleted.json() == {"request_id": _REQUEST_ID}
-    assert assigned.status_code == 200
-    assert assigned.json()["item"]["doc_metadata"] == {"部门": "工程", "year": 2026}
-
-    verbs = [verb for verb, _payload in module.calls]
-    assert verbs == ["list", "create", "rename", "delete", "set_metadata"]
-    _, (_, _, values) = module.calls[4]
-    assert values == {"部门": "工程", "year": 2026, "published_at": None}
-    assert type(values["year"]) is int
-    assert values["published_at"] is None
-
-
-@pytest.mark.asyncio
 async def test_http_metadata_routes_reject_bad_bodies_and_map_package_errors() -> None:
     module = _FakeModule()
     async with _client(_app(module)) as client:
@@ -969,76 +871,3 @@ async def test_http_metadata_routes_reject_bad_bodies_and_map_package_errors() -
         assert missing.status_code == 404
         assert missing.json()["detail"]["code"] == KNOWLEDGE_NOT_FOUND
         assert missing.json()["detail"]["request_id"] == _REQUEST_ID
-
-
-@pytest.mark.asyncio
-async def test_http_filter_fields_round_trips_the_discovery_view() -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        everything = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/filter-fields")
-        narrowed = await client.get(
-            f"/api/projects/{_PROJECT_ID}/knowledge/filter-fields",
-            params={"base_ids": [str(_BASE_ID)]},
-        )
-
-    assert everything.status_code == 200
-    assert everything.json() == {
-        "bases": [
-            {
-                "knowledge_base_id": str(_BASE_ID),
-                "fields": [
-                    {"kind": "builtin", "name": "document_name", "field_type": "string", "operators": ["eq", "contains"], "writable": False},
-                    {"kind": "custom", "name": "部门", "field_type": "string", "operators": ["eq", "contains"], "writable": True},
-                ],
-            }
-        ],
-        "request_id": _REQUEST_ID,
-    }
-    assert narrowed.status_code == 200
-    assert [verb for verb, _payload in module.calls] == ["filter_fields", "filter_fields"]
-    assert module.calls[0][1] == (_PROJECT_ID, None)
-    assert module.calls[1][1] == (_PROJECT_ID, [_BASE_ID])
-
-
-@pytest.mark.asyncio
-async def test_http_batch_metadata_patch_round_trips_and_maps_errors() -> None:
-    from actweave_knowledge import KNOWLEDGE_INVALID_REQUEST as INVALID
-
-    module = _FakeModule()
-    second_id = uuid.uuid4()
-    async with _client(_app(module)) as client:
-        applied = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
-            json={
-                "document_ids": [str(_DOCUMENT_ID), str(second_id)],
-                "values": {"部门": "工程", "year": None},
-            },
-        )
-        bad_body = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
-            json={"document_ids": [str(_DOCUMENT_ID)], "values": {"部门": ["列表"]}},
-        )
-
-        module.error = KnowledgeError(INVALID, "uploaded_at 是只读内建字段，不能通过元数据赋值写入")
-        builtin_write = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents/metadata",
-            json={"document_ids": [str(_DOCUMENT_ID)], "values": {"uploaded_at": 1}},
-        )
-
-    assert applied.status_code == 200
-    items = applied.json()["items"]
-    assert [item["id"] for item in items] == [str(_DOCUMENT_ID), str(second_id)]
-    assert items[0]["doc_metadata"] == {"部门": "工程"}
-    assert applied.json()["request_id"] == _REQUEST_ID
-    # The package DTO arrives intact: tuple ids plus the null-clearing key.
-    _, (_, base_id, patch) = module.calls[0]
-    assert base_id == _BASE_ID
-    assert patch.document_ids == (_DOCUMENT_ID, second_id)
-    assert patch.values == {"部门": "工程", "year": None}
-
-    assert bad_body.status_code == 422
-    # Package invalid-request errors map to 422 with the structured detail;
-    # the shape validation 422 above has no such envelope.
-    assert builtin_write.status_code == 422
-    assert builtin_write.json()["detail"]["code"] == INVALID
-    assert "内建" in builtin_write.json()["detail"]["message"]

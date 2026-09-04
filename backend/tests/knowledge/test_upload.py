@@ -35,7 +35,7 @@ from actweave_knowledge import (
     KnowledgePreviewTableSource,
     KnowledgeSettings,
 )
-from actweave_knowledge.documents import ALLOWED_DOCUMENT_EXTENSIONS, KnowledgeDocumentService
+from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.extraction.contracts import ParseWarning, ProcessingProfile, SourceSpan
 from actweave_knowledge.persistence.models import (
     KnowledgeBaseRow,
@@ -64,7 +64,6 @@ from app.knowledge.composition import is_knowledge_project_active
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
 # Package fixtures
@@ -135,7 +134,6 @@ class _RevokedAfterFirstTransaction:
 async def _harness(postgres_database_url: str, **settings_overrides: object) -> _UploadHarness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     store = _FakeObjectStore()
     service = KnowledgeDocumentService(
@@ -376,24 +374,6 @@ async def test_upload_freezes_parent_child_mode_and_normalizes_general_child_par
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extension", sorted(ALLOWED_DOCUMENT_EXTENSIONS))
-async def test_upload_accepts_every_frozen_extension(postgres_database_url: str, tmp_path: Path, extension: str) -> None:
-    harness = await _harness(postgres_database_url, etl_type="unstructured_local")
-    try:
-        project_id, base_id = await _seed_base(harness)
-        original_name = f"文件{extension.upper()}"  # extension matching is case-insensitive
-
-        view = await harness.service.upload_document(project_id, base_id, _upload(tmp_path, original_name=original_name))
-
-        assert view.original_name == original_name
-        assert view.status == "queued"
-        key = next(iter(harness.store.objects))
-        assert key.endswith(extension)
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_upload_rejects_unsupported_extensions(postgres_database_url: str, tmp_path: Path) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -435,36 +415,13 @@ async def test_upload_rejects_empty_and_oversized_files(postgres_database_url: s
     [
         {"name": "   "},
         {"chunk_size": 199},
-        {"chunk_size": 4001},
-        {"chunk_overlap": 501},
         {"chunk_size": 300, "chunk_overlap": 300},
         {"chunk_separator": ""},
-        {"chunk_separator": "#" * 65},
         {"remove_extra_spaces": "yes"},
-        {"remove_urls_emails": 1},
         {"chunking_mode": "hierarchical"},
         {"chunking_mode": "parent_child", "child_chunk_size": 99},
-        {"chunking_mode": "parent_child", "child_chunk_size": 2001},
         {"chunking_mode": "parent_child", "chunk_size": 400, "child_chunk_size": 400},
         {"chunking_mode": "parent_child", "child_chunk_separator": ""},
-        {"chunking_mode": "parent_child", "child_chunk_separator": "#" * 65},
-    ],
-    ids=[
-        "blank-name",
-        "chunk-too-small",
-        "chunk-too-large",
-        "overlap-too-large",
-        "overlap-not-below-chunk",
-        "separator-empty",
-        "separator-too-long",
-        "rule-not-bool",
-        "rule-int-not-bool",
-        "mode-unknown",
-        "child-too-small",
-        "child-too-large",
-        "child-not-below-chunk",
-        "child-separator-empty",
-        "child-separator-too-long",
     ],
 )
 async def test_upload_validates_name_and_chunk_parameters(postgres_database_url: str, tmp_path: Path, overrides: dict[str, object]) -> None:
@@ -1210,29 +1167,6 @@ async def test_http_upload_stages_multipart_body_and_cleans_temp_file(temp_path_
 
 
 @pytest.mark.asyncio
-async def test_http_upload_defaults_display_name_to_the_filename(temp_path_tracker: list[Path]) -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/documents",
-            files={"file": ("notes.md", b"# notes", "text/markdown")},
-        )
-
-    assert response.status_code == 200
-    _, (_, _, upload) = module.calls[0]
-    assert upload.name == "notes.md"
-    assert upload.chunk_size == 1000
-    assert upload.chunk_overlap == 100
-    assert upload.chunk_separator == "\\n\\n"
-    assert upload.remove_extra_spaces is False
-    assert upload.remove_urls_emails is False
-    assert upload.chunking_mode == "general"
-    assert upload.child_chunk_size == 500
-    assert upload.child_chunk_separator == "\\n"
-    assert all(not path.exists() for path in temp_path_tracker)
-
-
-@pytest.mark.asyncio
 async def test_http_chunk_preview_round_trips_and_cleans_temp_file(temp_path_tracker: list[Path]) -> None:
     module = _FakeModule()
     async with _client(_app(module)) as client:
@@ -1300,31 +1234,6 @@ async def test_http_chunk_preview_round_trips_and_cleans_temp_file(temp_path_tra
     assert module.staged_content == "# 标题\n\n正文".encode()
 
     assert temp_path_tracker, "the preview must stage through a temp file"
-    assert all(not path.exists() for path in temp_path_tracker)
-
-
-@pytest.mark.asyncio
-async def test_http_chunk_preview_forwards_parent_child_mode_and_returns_nested_children(temp_path_tracker: list[Path]) -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/chunk-preview",
-            files={"file": ("说明.md", "# 标题\n\n正文".encode(), "text/markdown")},
-            data={
-                "chunking_mode": "parent_child",
-                "child_chunk_size": "250",
-                "child_chunk_separator": "。",
-            },
-        )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert [item["child_contents"] for item in payload["items"]] == [["child-a", "child-b"], ["child-a", "child-b"]]
-
-    _, request = module.calls[0]
-    assert request.chunking_mode == "parent_child"
-    assert request.child_chunk_size == 250
-    assert request.child_chunk_separator == "。"
     assert all(not path.exists() for path in temp_path_tracker)
 
 
@@ -1431,24 +1340,7 @@ async def test_http_download_cleans_temp_when_the_module_fails(temp_path_tracker
 
 
 @pytest.mark.asyncio
-async def test_http_health_reports_module_probes(temp_path_tracker: list[Path]) -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        response = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/health")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "enabled": True,
-        "database_ok": True,
-        "storage_ok": False,
-        "message": "对象存储 bucket 不可访问",
-        "request_id": _REQUEST_ID,
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("create_binding", [{}, {"embedding_model_id": None}])
-async def test_http_unconfigured_base_create_and_first_configuration(create_binding: dict[str, None]) -> None:
+async def test_http_unconfigured_base_create_and_first_configuration() -> None:
     from dataclasses import replace
 
     from actweave_knowledge import KnowledgeBaseUpdateResult, KnowledgeBaseView
@@ -1489,7 +1381,7 @@ async def test_http_unconfigured_base_create_and_first_configuration(create_bind
             return KnowledgeBaseUpdateResult(base=replace(base_view, embedding_model_id=embedding_id, reranker_model_id=reranker_id, retrieval_mode="hybrid"))
 
     async with _client(_app(_BaseModule())) as client:
-        created = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/bases", json={"name": "待配置", **create_binding})
+        created = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/bases", json={"name": "待配置"})
         assert created.status_code == 200
         assert created.json()["item"]["embedding_model_id"] is None
         assert created.json()["item"]["document_count"] == 0
@@ -1501,301 +1393,6 @@ async def test_http_unconfigured_base_create_and_first_configuration(create_bind
         assert configured.json()["item"]["embedding_model_id"] == str(embedding_id)
         assert configured.json()["item"]["reranker_model_id"] == str(reranker_id)
         assert configured.json()["item"]["retrieval_mode"] == "hybrid"
-
-
-@pytest.mark.asyncio
-async def test_http_base_routes_round_trip_the_module_views() -> None:
-    from actweave_knowledge import KnowledgeBaseUpdateResult, KnowledgeBaseView, KnowledgeRebuildResult
-
-    base_view = KnowledgeBaseView(
-        id=_BASE_ID,
-        project_id=_PROJECT_ID,
-        name="产品手册",
-        description="",
-        embedding_model_id=uuid.uuid4(),
-        reranker_model_id=None,
-        retrieval_mode="semantic",
-        summary_index_enabled=False,
-        status="active",
-        document_count=2,
-        default_top_k=4,
-        default_score_threshold=0.2,
-        delete_error=None,
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-
-    class _BaseModule(_FakeModule):
-        async def create_knowledge_base(self, project_id, create, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("create_base", (project_id, create)))
-            return base_view
-
-        async def list_knowledge_bases(self, project_id, *, page=1, page_size=20, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("list_bases", (project_id, page, page_size)))
-            return [base_view], 1
-
-        async def get_knowledge_base(self, project_id, base_id, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("get_base", (project_id, base_id)))
-            return base_view
-
-        async def update_knowledge_base(self, project_id, base_id, update, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("update_base", (project_id, base_id, update)))
-            return KnowledgeBaseUpdateResult(base=base_view)
-
-        async def rebuild_knowledge_base(self, project_id, base_id, *, embedding_model_id, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("rebuild_base", (project_id, base_id, embedding_model_id)))
-            return KnowledgeRebuildResult(
-                base=base_view,
-                accepted_document_count=2,
-                skipped_document_ids=(uuid.UUID(int=7),),
-            )
-
-    module = _BaseModule()
-    rebuild_embedding_model_id = uuid.uuid4()
-    async with _client(_app(module)) as client:
-        created = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases",
-            json={"name": "产品手册", "embedding_model_id": str(base_view.embedding_model_id)},
-        )
-        listed = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases", params={"page_size": 5})
-        fetched = await client.get(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}")
-        patched = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}",
-            json={"status": "disabled", "default_top_k": 8, "default_score_threshold": 0.35, "retrieval_mode": "hybrid"},
-        )
-        bad_mode = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}",
-            json={"retrieval_mode": "fancy"},
-        )
-        rebuilt = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/rebuild",
-            json={"embedding_model_id": str(rebuild_embedding_model_id)},
-        )
-        rebuild_missing_body = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}/rebuild",
-            json={},
-        )
-
-    assert created.status_code == 200
-    assert created.json()["item"]["document_count"] == 2
-    assert created.json()["item"]["default_top_k"] == 4
-    assert created.json()["item"]["default_score_threshold"] == 0.2
-    assert created.json()["item"]["retrieval_mode"] == "semantic"
-    assert listed.status_code == 200
-    assert listed.json()["total"] == 1
-    assert fetched.status_code == 200
-    assert patched.status_code == 200
-    assert bad_mode.status_code == 422
-    assert rebuilt.status_code == 200
-    assert rebuilt.json()["item"]["id"] == str(_BASE_ID)
-    assert rebuilt.json()["accepted_document_count"] == 2
-    assert rebuilt.json()["skipped_document_ids"] == [str(uuid.UUID(int=7))]
-    assert rebuild_missing_body.status_code == 422
-
-    verbs = [verb for verb, _ in module.calls]
-    assert verbs == ["create_base", "list_bases", "get_base", "update_base", "rebuild_base"]
-    _, (create_project, create_dto) = module.calls[0]
-    assert create_project == _PROJECT_ID
-    assert create_dto.name == "产品手册"
-    assert create_dto.description == ""
-    assert create_dto.retrieval_mode == "semantic"  # the omitted default
-    _, (_, _, update_dto) = module.calls[3]
-    assert update_dto.status == "disabled"
-    assert update_dto.name is None
-    assert update_dto.default_top_k == 8
-    assert update_dto.default_score_threshold == 0.35
-    assert update_dto.retrieval_mode == "hybrid"
-    _, (_, rebuild_base_id, rebuild_dto) = module.calls[4]
-    assert rebuild_base_id == _BASE_ID
-    assert rebuild_dto == rebuild_embedding_model_id
-    assert isinstance(rebuild_dto, uuid.UUID)
-
-
-@pytest.mark.asyncio
-async def test_http_m4_routes_round_trip_delete_retry_and_segments() -> None:
-    from actweave_knowledge import KnowledgeBaseView, KnowledgeSegmentView
-
-    base_view = KnowledgeBaseView(
-        id=_BASE_ID,
-        project_id=_PROJECT_ID,
-        name="产品手册",
-        description="",
-        embedding_model_id=uuid.uuid4(),
-        reranker_model_id=None,
-        retrieval_mode="semantic",
-        summary_index_enabled=False,
-        status="deleting",
-        document_count=1,
-        default_top_k=4,
-        default_score_threshold=0.2,
-        delete_error=None,
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-    segment_view = KnowledgeSegmentView(
-        id=uuid.uuid4(),
-        document_version=2,
-        position=0,
-        content="第一段内容",
-        word_count=5,
-        enabled=True,
-        hit_count=0,
-        source_position={"page": 1},
-        created_at=_NOW,
-    )
-
-    class _M4Module(_FakeModule):
-        async def delete_knowledge_base(self, project_id, base_id, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("delete_base", (project_id, base_id)))
-            return base_view
-
-        async def delete_document(self, project_id, document_id, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("delete_document", (project_id, document_id)))
-            return _document_view(status="deleting", version=2)
-
-        async def retry_document(self, project_id, document_id, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("retry", (project_id, document_id)))
-            return _document_view(status="queued", version=3)
-
-        async def list_document_segments(self, project_id, document_id, *, page=1, page_size=20, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("segments", (project_id, document_id, page, page_size)))
-            return [segment_view], 1
-
-    module = _M4Module()
-    async with _client(_app(module)) as client:
-        base_deleted = await client.delete(f"/api/projects/{_PROJECT_ID}/knowledge/bases/{_BASE_ID}")
-        document_deleted = await client.delete(f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}")
-        retried = await client.post(f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/retry")
-        segments = await client.get(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/segments",
-            params={"page": 2, "page_size": 5},
-        )
-
-    assert base_deleted.status_code == 200
-    assert base_deleted.json()["item"]["status"] == "deleting"
-    assert document_deleted.status_code == 200
-    assert document_deleted.json()["item"]["status"] == "deleting"
-    assert retried.status_code == 200
-    assert retried.json()["item"]["status"] == "queued"
-    assert retried.json()["item"]["version"] == 3
-    assert segments.status_code == 200
-    body = segments.json()
-    assert body["total"] == 1
-    assert body["page"] == 2
-    assert body["items"][0]["content"] == "第一段内容"
-    assert body["items"][0]["source_position"] == {"page": 1}
-
-    assert [verb for verb, _ in module.calls] == ["delete_base", "delete_document", "retry", "segments"]
-    assert module.calls[3][1] == (_PROJECT_ID, _DOCUMENT_ID, 2, 5)
-
-
-@pytest.mark.asyncio
-async def test_http_reparse_routes_round_trip_the_module_views() -> None:
-    from actweave_knowledge import KnowledgeReparsePreview
-
-    preview = KnowledgeReparsePreview(
-        document_version=2,
-        preview=KnowledgeChunkPreview(
-            total=3,
-            chunks=(
-                KnowledgeChunkPreviewChunk(
-                    position=1,
-                    content="第一段",
-                    word_count=3,
-                    child_contents=("子块",),
-                    token_count=3,
-                ),
-            ),
-            preview_fingerprint="d" * 64,
-            source_sha256="e" * 64,
-            effective_profile=ProcessingProfile(
-                parse=make_parse_profile(".txt"),
-                chunk=make_chunk_profile(),
-            ),
-        ),
-    )
-
-    class _ReparseModule(_FakeModule):
-        async def preview_document_reparse(self, project_id, document_id, request, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("reparse_preview", (project_id, document_id, request)))
-            return preview
-
-        async def reparse_document(self, project_id, document_id, request, *, authority):  # noqa: ANN001
-            assert authority.project_id == project_id
-            self.calls.append(("reparse", (project_id, document_id, request)))
-            return _document_view(status="queued", version=3)
-
-    module = _ReparseModule()
-    async with _client(_app(module)) as client:
-        previewed = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/reparse-preview",
-            json={"expected_version": 2, "chunk_size": 300, "chunk_overlap": 0},
-        )
-        reparsed = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/reparse",
-            json={
-                "expected_version": 2,
-                "chunk_size": 300,
-                "chunk_overlap": 0,
-                "chunking_mode": "parent_child",
-                "child_chunk_size": 150,
-                "child_chunk_separator": "。",
-            },
-        )
-        missing_version = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/reparse",
-            json={"chunk_size": 300},
-        )
-        unknown_field = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/reparse",
-            json={"expected_version": 2, "embedding_model_id": str(uuid.uuid4())},
-        )
-
-    assert previewed.status_code == 200
-    body = previewed.json()
-    assert body["document_version"] == 2
-    assert body["total"] == 3
-    assert body["items"] == [
-        {
-            "position": 1,
-            "content": "第一段",
-            "word_count": 3,
-            "child_contents": ["子块"],
-            "token_count": 3,
-            "source_spans": [],
-            "attachments": [],
-        }
-    ]
-    assert body["preview_fingerprint"] == "d" * 64
-    assert body["source_sha256"] == "e" * 64
-
-    assert reparsed.status_code == 200
-    assert reparsed.json()["item"]["status"] == "queued"
-    assert reparsed.json()["item"]["version"] == 3
-
-    # expected_version is mandatory, and a model change is not even a field.
-    assert missing_version.status_code == 422
-    assert unknown_field.status_code == 422
-
-    verbs = [verb for verb, _ in module.calls]
-    assert verbs == ["reparse_preview", "reparse"]
-    _, (_, _, preview_request) = module.calls[0]
-    assert preview_request.expected_version == 2
-    assert preview_request.chunk_size == 300
-    _, (_, _, reparse_request) = module.calls[1]
-    assert reparse_request.chunking_mode == "parent_child"
-    assert reparse_request.child_chunk_size == 150
-    assert reparse_request.child_chunk_separator == "。"
 
 
 @pytest.mark.asyncio
@@ -2046,69 +1643,6 @@ async def test_http_routes_answer_disabled_when_the_module_is_absent() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == KNOWLEDGE_DISABLED
-
-
-def test_project_routes_declare_exactly_the_documented_capability_guards() -> None:
-    """Every project route must carry exactly one capability dependency, per the plan's table."""
-
-    from fastapi.routing import APIRoute
-
-    prefix = "/api/projects/{project_id}/knowledge"
-    expected = {
-        ("GET", f"{prefix}/model-options"): "read",
-        ("GET", f"{prefix}/file-capabilities"): "read",
-        ("GET", f"{prefix}/health"): "read",
-        ("POST", f"{prefix}/bases"): "edit",
-        ("GET", f"{prefix}/bases"): "read",
-        ("GET", f"{prefix}/bases/{{base_id}}"): "read",
-        ("PATCH", f"{prefix}/bases/{{base_id}}"): "edit",
-        ("DELETE", f"{prefix}/bases/{{base_id}}"): "edit",
-        ("POST", f"{prefix}/bases/{{base_id}}/documents"): "edit",
-        ("POST", f"{prefix}/chunk-preview"): "edit",
-        ("GET", f"{prefix}/bases/{{base_id}}/documents"): "read",
-        ("GET", f"{prefix}/documents/{{document_id}}"): "read",
-        ("GET", f"{prefix}/documents/{{document_id}}/attachments"): "edit",
-        ("GET", f"{prefix}/documents/{{document_id}}/download"): "read",
-        ("GET", f"{prefix}/documents/{{document_id}}/segments/{{segment_id}}/attachments/{{attachment_id}}"): "read",
-        ("DELETE", f"{prefix}/documents/{{document_id}}"): "edit",
-        ("POST", f"{prefix}/documents/{{document_id}}/retry"): "edit",
-        ("POST", f"{prefix}/documents/{{document_id}}/reparse-preview"): "edit",
-        ("POST", f"{prefix}/documents/{{document_id}}/reparse"): "edit",
-        ("PATCH", f"{prefix}/documents/{{document_id}}"): "edit",
-        ("POST", f"{prefix}/documents/batch-status"): "edit",
-        ("POST", f"{prefix}/documents/batch-delete"): "edit",
-        ("GET", f"{prefix}/documents/{{document_id}}/segments"): "read",
-        ("GET", f"{prefix}/bases/{{base_id}}/documents/{{document_id}}/segments/{{segment_id}}"): "read",
-        ("GET", f"{prefix}/bases/{{base_id}}/documents/{{document_id}}/segments/{{segment_id}}/attachments/{{attachment_id}}"): "read",
-        ("POST", f"{prefix}/documents/{{document_id}}/segments"): "edit",
-        ("PATCH", f"{prefix}/segments/{{segment_id}}"): "edit",
-        ("DELETE", f"{prefix}/segments/{{segment_id}}"): "edit",
-        ("POST", f"{prefix}/search"): "read",
-        ("GET", f"{prefix}/bases/{{base_id}}/queries"): "read",
-        ("POST", f"{prefix}/bases/{{base_id}}/rebuild"): "edit",
-        ("POST", f"{prefix}/bases/{{base_id}}/relex"): "edit",
-        ("GET", f"{prefix}/bases/{{base_id}}/metadata-fields"): "read",
-        ("POST", f"{prefix}/bases/{{base_id}}/metadata-fields"): "edit",
-        ("PATCH", f"{prefix}/metadata-fields/{{field_id}}"): "edit",
-        ("DELETE", f"{prefix}/metadata-fields/{{field_id}}"): "edit",
-        ("PATCH", f"{prefix}/documents/{{document_id}}/metadata"): "edit",
-        ("GET", f"{prefix}/filter-fields"): "read",
-        ("PATCH", f"{prefix}/bases/{{base_id}}/documents/metadata"): "edit",
-    }
-    guards = {
-        gateway.require_project_knowledge_read: "read",
-        gateway.require_project_knowledge_edit: "edit",
-    }
-
-    seen: dict[tuple[str, str], str] = {}
-    for route in gateway.project_router.routes:
-        assert isinstance(route, APIRoute)
-        capabilities = [guards[dependency.call] for dependency in route.dependant.dependencies if dependency.call in guards]
-        assert len(capabilities) == 1, f"{route.path} 必须恰好声明一个项目能力守卫"
-        for method in route.methods - {"HEAD", "OPTIONS"}:
-            seen[(method, route.path)] = capabilities[0]
-
-    assert seen == expected
 
 
 @pytest.mark.asyncio

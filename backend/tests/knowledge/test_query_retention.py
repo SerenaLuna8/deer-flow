@@ -25,7 +25,6 @@ from app.private_work.retention_purge import (
     RetentionCandidate,
     RetentionPurgeRepository,
 )
-from deerflow.persistence.bootstrap import _install_full_schema
 
 
 async def _seed_project_queries(
@@ -147,7 +146,6 @@ async def test_former_owner_phase_b_deletes_only_that_owners_query_history(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         retention_until = datetime.now(UTC)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
@@ -203,7 +201,6 @@ async def test_account_phase_b_deletes_only_that_owners_query_history(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         retention_until = datetime.now(UTC)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
@@ -259,7 +256,6 @@ async def test_project_knowledge_purge_deletes_every_owners_query_history(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id, _, _, _ = await _seed_project_queries(

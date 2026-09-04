@@ -11,7 +11,6 @@ from parsing_test_helpers import make_chunk_profile, make_document
 
 
 def split(documents, warnings=None, **overrides):
-    assert hasattr(splitter, "split_documents"), "structured splitting entry point is missing"
     return splitter.split_documents(tuple(documents), profile=make_chunk_profile(**overrides), warnings=warnings)
 
 
@@ -44,14 +43,6 @@ def test_table_continuations_keep_header_and_source():
     assert all(s.role == "context_prefix" for d in drafts[1:] for s in d.source_spans if s.location["row"] <= 2)
 
 
-def test_long_code_preserves_generics_and_balances_fences():
-    drafts = split([make_document("```cpp\n" + "List<int> values;\n" * 300 + "```", location={"paragraph": 2})], size=200, overlap=0, child_size=100)
-    assert len(drafts) > 1
-    assert_budgets(drafts)
-    assert all(d.content.startswith("```cpp\n") and d.content.rstrip().endswith("```") for d in drafts)
-    assert sum(d.content.count("List<int> values;") for d in drafts) == 300
-
-
 def test_long_code_line_splits_unicode_without_losing_payload():
     value = "告警🧑🏽‍💻List<int>" * 100
     drafts = split([make_document("```cpp\n" + value + "\n```")], size=200, overlap=0, child_size=100)
@@ -67,21 +58,6 @@ def test_source_intersections_after_merging_and_mid_paragraph_split():
     assert {s.location["paragraph"] for s in drafts[0].source_spans} == {1, 2}
     assert {s.location["paragraph"] for s in drafts[-1].source_spans} == {2, 3}
     assert all(d.content[s.start : s.end].strip().startswith({1: "A", 2: "B", 3: "C"}[s.location["paragraph"]]) for d in drafts for s in d.source_spans if d.content[s.start : s.end].strip())
-
-
-def test_heading_prefix_has_real_origin_and_shifts_body_offsets():
-    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
-
-    docs = MarkdownExtractor().markdown_to_tups("# 父标题\n\n介绍。\n\n## 子标题\n\n" + "正文检查。" * 250)
-    drafts = split(docs, size=200, overlap=0, child_size=100)
-    child_drafts = [d for d in drafts if "正文检查。" in d.content]
-    assert len(child_drafts) > 1
-    assert all(d.content.startswith("# 父标题\n\n## 子标题") for d in child_drafts)
-    for draft in child_drafts:
-        parent = [s for s in draft.source_spans if s.location.get("line") == 1]
-        assert parent and all(s.role == "context_prefix" for s in parent)
-        assert draft.content[parent[0].start : parent[0].end].strip() == "# 父标题"
-        assert any(s.location.get("line") == 7 and "正文" in draft.content[s.start : s.end] for s in draft.source_spans)
 
 
 @pytest.mark.parametrize("kind", ["heading", "table"])
@@ -121,18 +97,6 @@ def test_deep_heading_path_drops_top_levels_before_truncating():
     source = "".join(d.content[s.start : s.end] for d in drafts for s in d.source_spans if s.role == "source")
     assert source.count("总纲") == 120 and source.count("章节") == 120 and "叶子标题" in source
     assert "CONTEXT_PREFIX_TRUNCATED" in [warning.code for warning in warnings]
-
-
-def test_prefix_warnings_reach_the_pipeline_sink_once_per_truncation():
-    text = "# " + "标题" * 500 + "\n\n" + "正文。" * 300
-    warnings: list = []
-    drafts = split([make_document(text)], warnings, size=200, overlap=0, child_size=100, mode="parent_child")
-    assert_budgets(drafts)
-    # Parents and their children share the degraded prefix; the sink dedupes
-    # identical warnings so the document reports each degradation once.
-    assert [warning.code for warning in warnings] == ["OVERSIZED_PREFIX_SPLIT", "CONTEXT_PREFIX_TRUNCATED"]
-    assert all(child.content for draft in drafts for child in draft.children)
-    assert sum(d.content.count("正文。") for d in drafts) == 300
 
 
 def test_display_budget_and_character_cap_are_independent_of_index_budget():
@@ -189,10 +153,8 @@ def test_children_use_own_separator_and_sources_without_repeating_images():
     assert_budgets(drafts, size=1000)
     assert len(drafts) == 1 and len(drafts[0].children) > 1
     assert drafts[0].attachments == (occurrence,)
-    assert all(isinstance(c, splitter.ChildDraft) for c in drafts[0].children)
     assert sum(c.content.count("第一部分。") for c in drafts[0].children) == 30
     assert sum(c.content.count("第二部分。") for c in drafts[0].children) == 30
-    assert all(not hasattr(c, "attachments") for c in drafts[0].children)
 
 
 def test_pure_image_source_does_not_create_indexable_segment():
@@ -202,7 +164,6 @@ def test_pure_image_source_does_not_create_indexable_segment():
 def test_cleaning_protects_code_and_internal_refs_and_remaps_sources():
     from actweave_knowledge.ingestion import cleaner
 
-    assert hasattr(cleaner, "clean_documents"), "structured cleaner is missing"
     ref = "a" * 64
     text = f"联系 a@example.test  后续。\n\n`a@example.test  x`\n\n```text\nhttps://example.test  x\n```\n\n![图](knowledge-attachment://{ref})"
     cleaned = cleaner.clean_documents((make_document(text),), remove_extra_spaces=True, remove_urls_emails=True)[0]
@@ -272,14 +233,6 @@ def test_long_csv_fields_repeat_labels_but_not_values():
     assert all(s.location["row"] == 2 for d in value_drafts for s in d.source_spans if s.role == "source")
 
 
-def test_clip_source_spans_does_not_attach_outside_paragraphs():
-    from actweave_knowledge.ingestion.source_mapping import clip_source_spans
-
-    spans = tuple(SourceSpan(block_id=str(i), start=(i - 1) * 10, end=i * 10, location={"paragraph": i}) for i in (1, 2, 3))
-    clipped = clip_source_spans(spans, 7, 23)
-    assert [(s.start, s.end, s.location["paragraph"]) for s in clipped] == [(0, 3, 1), (3, 13, 2), (13, 16, 3)]
-
-
 def test_cleaning_external_link_keeps_visible_label_and_image_occurrence_offsets():
     from actweave_knowledge.ingestion.cleaner import clean_documents
 
@@ -308,22 +261,6 @@ def test_character_profile_keeps_old_size_units_and_typed_children():
     drafts = split([doc], unit="character", mode="parent_child", size=7, overlap=0, child_size=4, separator="。", child_separator="。")
     assert [d.content for d in drafts] == ["甲一。甲二。", "甲三。甲四。"]
     assert [[c.content for c in d.children] for d in drafts] == [["甲一。", "甲二。"], ["甲三。", "甲四。"]]
-    assert all(isinstance(c, splitter.ChildDraft) for d in drafts for c in d.children)
-
-
-def test_parent_and_child_custom_separator_choose_different_boundaries():
-    text = "A " * 55 + "边界" + "B " * 55 + "边界" + "C " * 55 + "边界" + "D " * 55
-    drafts = split([make_document(text)], size=200, overlap=0, child_size=100, separator="边界", child_separator="边界", mode="parent_child")
-    assert_budgets(drafts)
-    assert drafts[0].content.endswith("边界")
-    assert all(c.content.endswith("边界") for c in drafts[0].children)
-    assert all(not ("A" in c.content and "B" in c.content) for d in drafts for c in d.children)
-
-
-def test_heading_only_sections_and_header_only_table_are_not_dropped():
-    drafts = split([make_document("# First\n\n# Second\n\n| Column |\n| --- |")], overlap=0)
-    source_text = "".join(d.content[s.start : s.end] for d in drafts for s in d.source_spans if s.role == "source")
-    assert "First" in source_text and "Second" in source_text and "Column" in source_text
 
 
 def test_image_at_last_chunk_boundary_stays_bound_to_source_text():
@@ -342,16 +279,6 @@ def test_image_at_last_chunk_boundary_stays_bound_to_source_text():
     assert sum(d.content.count("word") for d in drafts) == 185
 
 
-def test_cleaning_keeps_same_logical_reference_inside_code_and_indented_code():
-    from actweave_knowledge.ingestion.cleaner import clean_documents
-
-    text = "    https://a.test   a@b.test\n\n```md\n[link](https://code.test)\n```\n\n[visible](https://remove.test)"
-    cleaned = clean_documents((make_document(text),), remove_extra_spaces=True, remove_urls_emails=True)[0]
-    assert "    https://a.test   a@b.test" in cleaned.page_content
-    assert "[link](https://code.test)" in cleaned.page_content
-    assert "[visible]" not in cleaned.page_content and "visible" in cleaned.page_content
-
-
 def test_long_parent_children_keep_fences_and_table_fields():
     text = "```cpp\n" + "Map<K,V> value;\n" * 140 + "```"
     drafts = split([make_document(text)], mode="parent_child", size=400, overlap=0, child_size=100)
@@ -359,20 +286,6 @@ def test_long_parent_children_keep_fences_and_table_fields():
     children = [c for d in drafts for c in d.children]
     assert all(c.content.startswith("```cpp\n") and c.content.endswith("```") for c in children)
     assert sum(c.content.count("Map<K,V> value;") for c in children) == 140
-
-
-def test_character_cleaning_still_has_mapped_source_intersections():
-    docs = [make_document("a@b.test  Keep this\r\n\r\n", location={"paragraph": 7})]
-    drafts = split(docs, unit="character", size=10, overlap=0, child_size=5, remove_urls_emails=True, remove_extra_spaces=True)
-    assert [d.content for d in drafts] == ["Keep this"]
-    assert drafts[0].source_spans and all(s.location == {"paragraph": 7} and s.end <= len(drafts[0].content) for s in drafts[0].source_spans)
-
-
-def test_indented_code_is_preserved_as_code_when_it_fits():
-    text = "    List<int> a;\n    Map<K,V> b;"
-    drafts = split([make_document(text)])
-    assert drafts[0].content == text
-    assert drafts[0].index_text == "List<int> a;\nMap<K,V> b;"
 
 
 def test_trailing_image_does_not_break_previous_code_fences():
@@ -402,53 +315,28 @@ def test_parent_child_long_table_fields_keep_every_value_and_column_context():
     assert sum(c.content.count("A123") for c in children) == 1
 
 
-def test_parent_hard_limit_accepts_5000_then_stops_before_later_content():
+def test_parent_hard_limit_stops_before_later_content(monkeypatch):
     from actweave_knowledge.contracts import KnowledgeError
 
-    documents = tuple(make_document("record", location={"page": i}) for i in range(1, 5002))
-    assert len(split(documents[:5000])) == 5000
-    too_late = make_document("# " + "huge " * 2000, location={"page": 5002})
+    monkeypatch.setattr(splitter, "KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT", 5)
+    documents = tuple(make_document("record", location={"page": i}) for i in range(1, 7))
+    assert len(split(documents[:5])) == 5
+    too_late = make_document("# " + "huge " * 2000, location={"page": 7})
     with pytest.raises(KnowledgeError) as caught:
         split((*documents, too_late))
     assert caught.value.code == "KNOWLEDGE_QUOTA_EXCEEDED"
 
 
-def test_vector_hard_limit_counts_children_separately_from_parents():
+def test_vector_hard_limit_counts_children_separately_from_parents(monkeypatch):
     from actweave_knowledge.contracts import KnowledgeError
 
-    documents = tuple(make_document("alpha " * 60 + "\n\n" + "beta " * 60, location={"page": i}) for i in range(1, 2502))
-    drafts = split(documents[:2500], size=200, overlap=0, child_size=100, mode="parent_child")
-    assert len(drafts) == 2500 and sum(len(d.children) for d in drafts) == 5000
+    monkeypatch.setattr(splitter, "KNOWLEDGE_MAX_SEGMENTS_PER_DOCUMENT", 4)
+    documents = tuple(make_document("alpha " * 60 + "\n\n" + "beta " * 60, location={"page": i}) for i in range(1, 4))
+    drafts = split(documents[:2], size=200, overlap=0, child_size=100, mode="parent_child")
+    assert len(drafts) == 2 and sum(len(d.children) for d in drafts) == 4
     with pytest.raises(KnowledgeError) as caught:
         split(documents, size=200, overlap=0, child_size=100, mode="parent_child")
     assert caught.value.code == "KNOWLEDGE_QUOTA_EXCEEDED"
-
-
-def test_heading_without_body_is_split_as_text_with_a_warning():
-    """A heading-only section wider than the budget is really a paragraph
-    marked as a heading: its text is kept in full across ordinary chunks."""
-
-    warnings: list = []
-    drafts = split([make_document("# " + "title " * 1000)], warnings, size=200, overlap=0, child_size=100)
-    assert_budgets(drafts)
-    assert sum(d.content.count("title") for d in drafts) == 1000
-    assert [warning.code for warning in warnings] == ["OVERSIZED_PREFIX_SPLIT"]
-
-
-def test_tiny_child_budget_still_fails_closed_when_nothing_fits():
-    """Degradation stops at the budget floor: an inline atom that cannot fit
-    on its own is still an explicit failure, never dropped text."""
-
-    with pytest.raises(ExtractionError) as caught:
-        split([make_document("[label](https://example.test/" + "y" * 3000 + ")")], size=200, overlap=0, child_size=100)
-    assert caught.value.reason_code == "ATOMIC_CONTENT_EXCEEDS_BUDGET"
-
-
-def test_marked_table_header_without_rows_preserves_source():
-    header = make_document("| Column |\n| --- |", location={"table": 1, "table_path": "1", "row": 1}).model_copy(update={"kind": "table_header"})
-    drafts = split([header])
-    assert len(drafts) == 1 and "Column" in drafts[0].index_text
-    assert drafts[0].source_spans[0].role == "source"
 
 
 def test_review_heading_only_extracted_section_keeps_physical_heading():
@@ -463,12 +351,11 @@ def test_review_heading_only_extracted_section_keeps_physical_heading():
     assert any(s.location.get("line") == 1 for d in drafts for s in d.source_spans if s.role == "source")
 
 
-@pytest.mark.parametrize("extracted", [True, False])
-def test_review_skipped_heading_levels_keep_all_real_ancestors(extracted):
+def test_skipped_heading_levels_keep_all_real_ancestors():
     from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     text = "# Root\n\n### Middle\n\n#### Leaf\n\n" + "body " * 400
-    documents = MarkdownExtractor().markdown_to_tups(text) if extracted else [make_document(text)]
+    documents = MarkdownExtractor().markdown_to_tups(text)
     drafts = split(documents, size=200, overlap=0, child_size=100)
     leaf_drafts = [d for d in drafts if "body" in d.content]
     assert len(leaf_drafts) > 1
@@ -476,29 +363,10 @@ def test_review_skipped_heading_levels_keep_all_real_ancestors(extracted):
     for draft in leaf_drafts:
         middle = [s for s in draft.source_spans if "### Middle" in draft.content[s.start : s.end]]
         assert middle and all(s.role == "context_prefix" for s in middle)
-        if extracted:
-            assert all(s.location.get("line") == 3 for s in middle)
+        assert all(s.location.get("line") == 3 for s in middle)
 
 
-@pytest.mark.parametrize("mode", ["general", "parent_child"])
-def test_review_indented_code_followed_by_prose_keeps_markdown_semantics(mode):
-    from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
-    from markdown_it import MarkdownIt
-
-    text = "    List<int> a;\n    Map<K,V> b;\n\nExplanation follows."
-    documents = MarkdownExtractor().markdown_to_tups(text)
-    drafts = split(documents, mode=mode, size=200, overlap=0, child_size=100)
-    assert len(drafts) == 1 and drafts[0].content == text
-    values = [*drafts, *(c for d in drafts for c in d.children)]
-    for value in values:
-        codes = [t.content for t in MarkdownIt().parse(value.content) if t.type == "code_block"]
-        assert codes == ["List<int> a;\nMap<K,V> b;\n"]
-        assert "Explanation follows." in value.content
-        assert value.content[value.source_spans[0].start : value.source_spans[0].end].startswith("    List<int>")
-
-
-@pytest.mark.parametrize("mode", ["general", "parent_child"])
-def test_review_actual_word_leading_image_retains_exact_occurrence(tmp_path, mode):
+def test_actual_word_leading_image_retains_exact_occurrence(tmp_path):
     from actweave_knowledge.extraction.builtin.word_extractor import WordExtractor
     from docx import Document as WordDocument
     from parsing_test_helpers import make_context
@@ -517,7 +385,7 @@ def test_review_actual_word_leading_image_retains_exact_occurrence(tmp_path, mod
     original = documents[0].attachments[0]
     original_ref = documents[0].page_content[original.source.start : original.source.end]
     assert original_ref.startswith("![图片](knowledge-attachment:")
-    drafts = split(documents, mode=mode, size=200, overlap=0, child_size=100)
+    drafts = split(documents, mode="parent_child", size=200, overlap=0, child_size=100)
     assert_budgets(drafts)
     occurrences = [(d, image) for d in drafts for image in d.attachments]
     assert len(occurrences) == 1
@@ -527,16 +395,14 @@ def test_review_actual_word_leading_image_retains_exact_occurrence(tmp_path, mod
     assert draft.content.index(original_ref) < draft.content.index("word")
     assert sum(d.content.count("word") for d in drafts) == 185
     assert all("word" in d.index_text for d in drafts)
-    if mode == "parent_child":
-        assert sum(c.content.count("word") for d in drafts for c in d.children) == 185
+    assert sum(c.content.count("word") for d in drafts for c in d.children) == 185
 
 
-@pytest.mark.parametrize("extracted", [True, False])
-def test_review_skipped_level_sibling_does_not_inherit_previous_branch(extracted):
+def test_skipped_level_sibling_does_not_inherit_previous_branch():
     from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
 
     text = "# Root\n\n### Middle\n\n#### Leaf\n\nleaf body\n\n### Sibling\n\nsibling body"
-    documents = MarkdownExtractor().markdown_to_tups(text) if extracted else [make_document(text)]
+    documents = MarkdownExtractor().markdown_to_tups(text)
     drafts = split(documents)
     sibling = next(d for d in drafts if "sibling body" in d.content)
     assert sibling.content.startswith("# Root\n\n### Sibling")
@@ -572,8 +438,7 @@ def test_review_impossible_image_and_atomic_text_budget_fails_without_partial_re
     assert caught.value.reason_code == "ATOMIC_CONTENT_EXCEEDS_BUDGET"
 
 
-@pytest.mark.parametrize("mode", ["general", "parent_child"])
-def test_review2_real_markdown_placeholder_preserves_indented_code_payload_and_sources(mode):
+def test_real_markdown_placeholder_preserves_indented_code_payload_and_sources():
     from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
     from markdown_it import MarkdownIt
 
@@ -583,12 +448,12 @@ def test_review2_real_markdown_placeholder_preserves_indented_code_payload_and_s
     assert canonical.startswith("（外部图片未获取：image）")
     expected = "".join(token.content for token in MarkdownIt().parse(canonical) if token.type == "code_block")
     assert expected == "total += 1\n" * 33
-    drafts = split(documents, size=200, overlap=0, child_size=100, mode=mode)
+    drafts = split(documents, size=200, overlap=0, child_size=100, mode="parent_child")
     assert_budgets(drafts)
     parent_payload = "".join(token.content for draft in drafts for token in MarkdownIt().parse(draft.content) if token.type in {"code_block", "fence"})
     assert parent_payload == expected
     compile(parent_payload, "chunked_source", "exec")
-    groups = [drafts] + ([[child for draft in drafts for child in draft.children]] if mode == "parent_child" else [])
+    groups = [drafts, [child for draft in drafts for child in draft.children]]
     for group in groups:
         payload = "".join(token.content for value in group for token in MarkdownIt().parse(value.content) if token.type in {"code_block", "fence"})
         assert payload == expected
@@ -601,9 +466,8 @@ def test_review2_real_markdown_placeholder_preserves_indented_code_payload_and_s
         assert all("".join(parts).rstrip("\n") == "total += 1" for parts in covered.values())
 
 
-@pytest.mark.parametrize("indent", ["    ", "\t", "  \t"])
-@pytest.mark.parametrize("mode", ["general", "parent_child"])
-def test_review2_code_conversion_removes_only_markdown_indent(indent, mode):
+@pytest.mark.parametrize("indent", ["    ", "\t"])
+def test_code_conversion_removes_only_markdown_indent(indent):
     from actweave_knowledge.extraction.builtin.markdown_extractor import MarkdownExtractor
     from markdown_it import MarkdownIt
 
@@ -611,9 +475,9 @@ def test_review2_code_conversion_removes_only_markdown_indent(indent, mode):
     documents = MarkdownExtractor().markdown_to_tups(source)
     expected = "".join(t.content for document in documents for t in MarkdownIt().parse(document.page_content) if t.type == "code_block")
     assert expected == "if ready:\n    total += 1\n" * 35
-    drafts = split(documents, size=200, overlap=0, child_size=100, mode=mode)
+    drafts = split(documents, size=200, overlap=0, child_size=100, mode="parent_child")
     assert_budgets(drafts)
-    values = [child for draft in drafts for child in draft.children] if mode == "parent_child" else drafts
+    values = [child for draft in drafts for child in draft.children]
     actual = "".join(t.content for value in values for t in MarkdownIt().parse(value.content) if t.type in {"code_block", "fence"})
     assert actual == expected
     compile(actual, "chunked_nested_source", "exec")

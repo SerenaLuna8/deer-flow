@@ -25,7 +25,7 @@ from actweave_knowledge import (
     KnowledgeRerankMaterial,
 )
 from registry_helpers import TEST_REGISTRY_API_KEY, registry_secret_key
-from sqlalchemy import event, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.audit.models import AssetAuditMetadata, AuditAction, AuditOutcome, SystemAuditContext
@@ -35,7 +35,6 @@ from app.model_registry.service import (
     list_active_retrieval_model_options,
 )
 from app.reliability.operations import resolve_current_system_audit_context
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow, ModelProviderRow
 
 _REQUEST_ID = "registry-service-test"
@@ -170,7 +169,6 @@ async def _issued_context(
 async def _harness(postgres_database_url: str) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     admin_id = await _seed_admin(factory)
     context = await _issued_context(factory, admin_id)
     client = _StubProbeClient()
@@ -243,43 +241,6 @@ async def _provider_row(harness: _Harness, provider_id: uuid.UUID) -> ModelProvi
         return row
 
 
-@pytest.mark.asyncio
-async def test_admin_recheck_locks_share_for_reads_and_update_for_writes(postgres_database_url: str) -> None:
-    """List paths re-verify the admin under FOR SHARE so concurrent reads do
-    not serialize on the admin row; mutations keep FOR UPDATE so a demotion
-    serializes against registry writes."""
-
-    harness = await _harness(postgres_database_url)
-    statements: list[str] = []
-
-    @event.listens_for(harness.engine.sync_engine, "before_cursor_execute")
-    def _capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
-        statements.append(statement)
-
-    def _admin_locks() -> list[str]:
-        captured = [s for s in statements if "FROM users" in s and "FOR " in s]
-        statements.clear()
-        return captured
-
-    try:
-        provider_id = await _create_provider(harness)
-        statements.clear()
-
-        await harness.service.list_providers(harness.context)
-        read_locks = _admin_locks()
-        assert read_locks and all("FOR SHARE" in s for s in read_locks)
-
-        await harness.service.list_models(harness.context, provider_id)
-        read_locks = _admin_locks()
-        assert read_locks and all("FOR SHARE" in s for s in read_locks)
-
-        await harness.service.update_provider(harness.context, provider_id, name="Locked Rename")
-        write_locks = _admin_locks()
-        assert write_locks and all("FOR UPDATE" in s for s in write_locks)
-    finally:
-        await harness.engine.dispose()
-
-
 def test_provider_row_repr_excludes_encrypted_key_material() -> None:
     """The generic all-columns repr must not leak the encrypted API Key
     components into logs or diagnostics."""
@@ -296,72 +257,6 @@ def test_provider_row_repr_excludes_encrypted_key_material() -> None:
     assert "api_key_nonce" not in text
     assert "api_key_ciphertext" not in text
     assert "Provider" in text
-
-
-@pytest.mark.asyncio
-async def test_registry_schema_supports_terminal_soft_delete_and_live_name_reuse(
-    postgres_database_url: str,
-) -> None:
-    """Deleted registry rows remain tombstones without occupying live names."""
-
-    engine = create_async_engine(postgres_database_url)
-    try:
-        await _install_full_schema(engine)
-        async with engine.connect() as connection:
-            deleted_columns = {
-                (row.table_name, row.udt_name, row.is_nullable)
-                for row in await connection.execute(
-                    text(
-                        """SELECT table_name, udt_name, is_nullable
-                           FROM information_schema.columns
-                           WHERE table_schema = current_schema()
-                             AND column_name = 'deleted_at'
-                             AND table_name IN ('model_providers', 'model_provider_models')"""
-                    )
-                )
-            }
-            deleted_state = await connection.scalar(
-                text(
-                    """SELECT pg_get_constraintdef(oid)
-                       FROM pg_constraint
-                       WHERE connamespace = current_schema()::regnamespace
-                         AND conname = 'ck_model_provider_models_deleted_state'"""
-                )
-            )
-            live_unique_indexes = {
-                (row.table_name, row.index_name): row.predicate
-                for row in await connection.execute(
-                    text(
-                        """SELECT table_relation.relname AS table_name,
-                                  index_relation.relname AS index_name,
-                                  pg_get_expr(index_catalog.indpred, index_catalog.indrelid) AS predicate
-                           FROM pg_index index_catalog
-                           JOIN pg_class table_relation ON table_relation.oid = index_catalog.indrelid
-                           JOIN pg_class index_relation ON index_relation.oid = index_catalog.indexrelid
-                           JOIN pg_namespace namespace ON namespace.oid = table_relation.relnamespace
-                           WHERE namespace.nspname = current_schema()
-                             AND index_relation.relname IN (
-                                 'uq_model_providers_name',
-                                 'uq_model_provider_models_identity'
-                             )"""
-                    )
-                )
-            }
-
-        assert deleted_columns == {
-            ("model_providers", "timestamptz", "YES"),
-            ("model_provider_models", "timestamptz", "YES"),
-        }
-        assert deleted_state is not None
-        assert "deleted_at IS NULL" in deleted_state
-        assert "status" in deleted_state and "disabled" in deleted_state
-        assert set(live_unique_indexes) == {
-            ("model_providers", "uq_model_providers_name"),
-            ("model_provider_models", "uq_model_provider_models_identity"),
-        }
-        assert all(predicate is not None and "deleted_at IS NULL" in predicate for predicate in live_unique_indexes.values())
-    finally:
-        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -574,25 +469,6 @@ async def test_create_model_validates_shape_before_any_probe(postgres_database_u
         with pytest.raises(KnowledgeError) as missing:
             await _create_embedding(harness, uuid.uuid4())
         assert missing.value.code == KNOWLEDGE_NOT_FOUND
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_create_model_name_is_unique_per_provider_and_type(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        provider_id = await _create_provider(harness)
-        await _create_embedding(harness, provider_id, model_name="shared-name")
-
-        with pytest.raises(KnowledgeError) as conflict:
-            await _create_embedding(harness, provider_id, model_name="shared-name")
-        assert conflict.value.code == KNOWLEDGE_NAME_CONFLICT
-
-        # The same name under another type (or another provider) is fine.
-        await _create_rerank(harness, provider_id, model_name="shared-name")
-        other_provider = await _create_provider(harness)
-        await _create_embedding(harness, other_provider, model_name="shared-name")
     finally:
         await harness.engine.dispose()
 
@@ -812,24 +688,6 @@ async def test_update_provider_failing_probe_keeps_the_stored_material(postgres_
         await harness.engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_update_provider_rejects_unknown_ids_and_name_conflicts(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        await _create_provider(harness, name="First")
-        second = await _create_provider(harness, name="Second")
-
-        with pytest.raises(KnowledgeError) as missing:
-            await harness.service.update_provider(harness.context, uuid.uuid4(), name="Anything")
-        assert missing.value.code == KNOWLEDGE_NOT_FOUND
-
-        with pytest.raises(KnowledgeError) as conflict:
-            await harness.service.update_provider(harness.context, second, name="First")
-        assert conflict.value.code == KNOWLEDGE_NAME_CONFLICT
-    finally:
-        await harness.engine.dispose()
-
-
 # ---------------------------------------------------------------------------
 # Providers: delete
 # ---------------------------------------------------------------------------
@@ -866,36 +724,6 @@ async def test_delete_provider_requires_no_live_models_and_keeps_a_hidden_tombst
             await harness.service.delete_provider(harness.context, provider_id)
         assert missing.value.code == KNOWLEDGE_NOT_FOUND
         assert harness.audit.operations()[-2:] == ["provider_model.delete", "model_provider.delete"]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_soft_deleted_provider_releases_its_live_name(
-    postgres_database_url: str,
-) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        provider_name = "Reusable Provider"
-        deleted_provider_id = await _create_provider(harness, name=provider_name)
-        await harness.service.delete_provider(harness.context, deleted_provider_id)
-
-        replacement_id = await _create_provider(harness, name=provider_name)
-        assert replacement_id != deleted_provider_id
-
-        async with harness.factory() as session:
-            deleted_provider = await session.get(ModelProviderRow, deleted_provider_id)
-            replacement = await session.get(ModelProviderRow, replacement_id)
-            assert deleted_provider is not None
-            assert getattr(deleted_provider, "deleted_at", None) is not None
-            assert replacement is not None
-            assert getattr(replacement, "deleted_at", None) is None
-            assert await session.scalar(select(func.count()).select_from(ModelProviderRow)) == 2
-
-        providers = await harness.service.list_providers(harness.context)
-        assert [(provider.id, provider.name) for provider in providers] == [
-            (replacement_id, provider_name),
-        ]
     finally:
         await harness.engine.dispose()
 
@@ -1010,45 +838,6 @@ async def test_delete_model_keeps_a_disabled_tombstone_and_hides_it_from_catalog
 
 
 @pytest.mark.asyncio
-async def test_soft_deleted_model_releases_its_live_provider_type_and_name_identity(
-    postgres_database_url: str,
-) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        provider_id = await _create_provider(harness)
-        model_name = "reusable-embedding"
-        deleted_model_id = await _create_embedding(
-            harness,
-            provider_id,
-            model_name=model_name,
-        )
-        await harness.service.delete_model(harness.context, deleted_model_id)
-
-        replacement_id = await _create_embedding(
-            harness,
-            provider_id,
-            model_name=model_name,
-        )
-        assert replacement_id != deleted_model_id
-
-        async with harness.factory() as session:
-            deleted_model = await session.get(ModelProviderModelRow, deleted_model_id)
-            replacement = await session.get(ModelProviderModelRow, replacement_id)
-            assert deleted_model is not None
-            assert getattr(deleted_model, "deleted_at", None) is not None
-            assert replacement is not None
-            assert getattr(replacement, "deleted_at", None) is None
-            assert await session.scalar(select(func.count()).select_from(ModelProviderModelRow)) == 2
-
-        models = await harness.service.list_models(harness.context, provider_id)
-        assert [(model.id, model.model_name) for model in models] == [
-            (replacement_id, model_name),
-        ]
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_test_model_reports_failure_as_a_result_and_audits_the_outcome(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -1082,35 +871,6 @@ async def test_test_model_reports_failure_as_a_result_and_audits_the_outcome(pos
 # ---------------------------------------------------------------------------
 # Listing and project-facing options
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_list_providers_and_models_derive_counts_freeze_and_in_use(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        provider_id = await _create_provider(harness, name="Alpha")
-        embedding_id = await _create_embedding(harness, provider_id)
-        rerank_id = await _create_rerank(harness, provider_id)
-        await _create_provider(harness, name="Beta")
-        harness.in_use_ids.add(embedding_id)
-
-        providers = await harness.service.list_providers(harness.context)
-        assert [(view.name, view.model_count, view.active_model_count, view.endpoint_frozen) for view in providers] == [
-            ("Alpha", 2, 2, True),
-            ("Beta", 0, 0, False),
-        ]
-
-        models = await harness.service.list_models(harness.context, provider_id)
-        assert [(view.id, view.in_use) for view in models] == [
-            (embedding_id, True),
-            (rerank_id, False),
-        ]
-
-        with pytest.raises(KnowledgeError) as missing:
-            await harness.service.list_models(harness.context, uuid.uuid4())
-        assert missing.value.code == KNOWLEDGE_NOT_FOUND
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio

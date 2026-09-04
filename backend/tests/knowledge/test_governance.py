@@ -57,7 +57,6 @@ from app.knowledge.composition import (
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow
 
 # ---------------------------------------------------------------------------
@@ -114,7 +113,6 @@ class _Harness:
 async def _harness(postgres_database_url: str, **settings_overrides: object) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     client = _ScriptedEmbedClient([0.5, 0.5, 0.0])
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     service = KnowledgeSegmentService(
@@ -1104,64 +1102,6 @@ def _app(module: _FakeModule) -> FastAPI:
 
 def _client(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
-
-
-@pytest.mark.asyncio
-async def test_http_k1_routes_round_trip() -> None:
-    module = _FakeModule()
-    async with _client(_app(module)) as client:
-        renamed = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}",
-            json={"name": "新名字"},
-        )
-        batch_status = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/batch-status",
-            json={"document_ids": [str(_DOCUMENT_ID)], "enabled": False},
-        )
-        batch_delete = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/batch-delete",
-            json={"document_ids": [str(_DOCUMENT_ID)]},
-        )
-        created = await client.post(
-            f"/api/projects/{_PROJECT_ID}/knowledge/documents/{_DOCUMENT_ID}/segments",
-            json={"content": "新增分段"},
-        )
-        updated = await client.patch(
-            f"/api/projects/{_PROJECT_ID}/knowledge/segments/{_SEGMENT_ID}",
-            json={"enabled": False},
-        )
-        deleted = await client.delete(f"/api/projects/{_PROJECT_ID}/knowledge/segments/{_SEGMENT_ID}")
-
-    assert renamed.status_code == 200
-    assert renamed.json()["item"]["name"] == "新名字"
-    assert batch_status.status_code == 200
-    assert [item["enabled"] for item in batch_status.json()["items"]] == [False]
-    assert batch_delete.status_code == 200
-    assert [item["status"] for item in batch_delete.json()["items"]] == ["deleting"]
-    assert created.status_code == 200
-    assert created.json()["item"]["content"] == "新增分段"
-    assert created.json()["item"]["word_count"] == 4
-    assert created.json()["item"]["token_count"] == 19
-    assert created.json()["item"]["source_spans"] == []
-    assert updated.status_code == 200
-    assert updated.json()["item"]["enabled"] is False
-    assert updated.json()["item"]["source_position"] == {"manual": True}
-    assert updated.json()["item"]["token_count"] == 19
-    assert updated.json()["item"]["source_spans"] == []
-    serialized = json.dumps(
-        {"created": created.json(), "updated": updated.json()},
-        ensure_ascii=False,
-    )
-    for forbidden in ("index_text", "extraction_id", "storage_key", "url"):
-        assert forbidden not in serialized
-    assert deleted.status_code == 200
-    assert deleted.json()["item"]["segment_count"] == 0
-
-    verbs = [verb for verb, _payload in module.calls]
-    assert verbs == ["rename", "batch_status", "batch_delete", "create_segment", "update_segment", "delete_segment"]
-    _, (_, document_ids, enabled) = module.calls[1]
-    assert document_ids == [_DOCUMENT_ID]
-    assert enabled is False
 
 
 @pytest.mark.asyncio

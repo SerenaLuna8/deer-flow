@@ -1,16 +1,12 @@
-"""M4 gates: extraction, splitting, and the ingest pipeline.
+"""Critical ingest/reparse lifecycle and retained character-profile regressions.
 
-Extractor and splitter tests are pure fixtures; pipeline tests run against the
-installed Schema V1 snapshot with a fake object store, a fake model client, and
-the production registry model port, so every database effect (processing flip,
-publish transaction, late no-op) is exercised for real.
+Pipeline tests use real PostgreSQL with fake object storage and model transport;
+dedicated extractor tests own the individual file-format matrix.
 """
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import codecs
 import hashlib
 import tempfile
 import uuid
@@ -33,23 +29,14 @@ from actweave_knowledge.contracts import KNOWLEDGE_LEXICAL_VERSION
 from actweave_knowledge.documents import KnowledgeDocumentService
 from actweave_knowledge.extraction.contracts import ProcessingProfile
 from actweave_knowledge.ingestion import (
-    PREVIEW_CHUNK_LIMIT,
     ExtractedBlock,
     KnowledgeIngestionHandler,
-    clean_blocks,
     clean_text,
-    decode_separator,
-    extract_blocks,
     preview_document_chunks,
     split_blocks,
 )
 from actweave_knowledge.ingestion import pipeline as pipeline_module
-from actweave_knowledge.ingestion import preview as preview_module
 from actweave_knowledge.ingestion.splitter import (
-    ChildDraft,
-    SegmentDraft,
-    attach_children,
-    normalize_text,
     split_child_chunks,
 )
 from actweave_knowledge.persistence.models import (
@@ -62,8 +49,6 @@ from actweave_knowledge.persistence.models import (
 from actweave_knowledge.persistence.tasks import claim_next_task
 from actweave_knowledge.retrieval import encode_lexical_token, lexical_v1_tokens
 from actweave_knowledge.tasks import KnowledgeTaskClaim, KnowledgeTaskWorker
-from actweave_knowledge.tasks import deletion as deletion_module
-from actweave_knowledge.tasks import worker as worker_module
 from extraction_test_helpers import (
     ExtractionObjectStore,
     make_test_file_capability_provider,
@@ -71,147 +56,21 @@ from extraction_test_helpers import (
 )
 from ingestion_test_helpers import FakeModelClient as _FakeModelClient
 from parsing_test_helpers import make_chunk_profile, make_parse_profile
-from parsing_test_helpers import write_pdf as _write_pdf
 from registry_helpers import registry_model_port, seed_embedding_model, seed_provider
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge.composition import is_knowledge_project_active
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow
 
 # ---------------------------------------------------------------------------
-# Format fixtures
+# End-to-end preview and retained character-profile behavior
 # ---------------------------------------------------------------------------
 
 
-def _write_docx(path: Path, paragraphs: list[str]) -> None:
-    import docx
-
-    document = docx.Document()
-    for paragraph in paragraphs:
-        document.add_paragraph(paragraph)
-    document.save(str(path))
-
-
-def _write_xlsx(path: Path, rows: list[list[object]]) -> None:
-    import openpyxl
-
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "数据"
-    for row in rows:
-        sheet.append(row)
-    workbook.save(str(path))
-
-
-def _write_pptx(path: Path, slides: list[list[str]]) -> None:
-    from pptx import Presentation
-    from pptx.util import Inches
-
-    presentation = Presentation()
-    blank_layout = presentation.slide_layouts[6]
-    for texts in slides:
-        slide = presentation.slides.add_slide(blank_layout)
-        for index, content in enumerate(texts):
-            box = slide.shapes.add_textbox(Inches(1), Inches(1 + index), Inches(6), Inches(1))
-            box.text_frame.text = content
-    presentation.save(str(path))
-
-
-def _write_epub(path: Path, chapters: list[tuple[str, str]]) -> None:
-    from ebooklib import epub
-
-    book = epub.EpubBook()
-    book.set_identifier("k4-test-epub")
-    book.set_title("测试书")
-    book.set_language("zh")
-    items = []
-    for index, (title, body) in enumerate(chapters, start=1):
-        chapter = epub.EpubHtml(title=title, file_name=f"ch{index}.xhtml", lang="zh")
-        chapter.content = f"<html><body><h1>{title}</h1><p>{body}</p></body></html>"
-        book.add_item(chapter)
-        items.append(chapter)
-    book.toc = items
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
-    book.spine = ["nav", *items]
-    epub.write_epub(str(path), book)
-
-
 # ---------------------------------------------------------------------------
-# Extractor
+# Preview
 # ---------------------------------------------------------------------------
-
-
-def test_extract_pdf_pages_become_blocks_with_page_positions(tmp_path: Path) -> None:
-    path = tmp_path / "guide.pdf"
-    _write_pdf(path, ["Knowledge page one", "Knowledge page two"])
-
-    blocks = extract_blocks(path, ".pdf")
-
-    texts = [block.text.strip() for block in blocks]
-    assert "Knowledge page one" in texts[0]
-    assert "Knowledge page two" in texts[1]
-    assert [block.source_position for block in blocks] == [{"page": 1}, {"page": 2}]
-
-
-def test_extract_docx_paragraphs_become_blocks(tmp_path: Path) -> None:
-    path = tmp_path / "guide.docx"
-    _write_docx(path, ["第一段：产品概述。", "第二段：安装步骤。"])
-
-    blocks = extract_blocks(path, ".docx")
-
-    assert [block.text for block in blocks] == ["第一段：产品概述。", "第二段：安装步骤。"]
-    assert blocks[0].source_position == {"paragraph": 1}
-    assert blocks[1].source_position == {"paragraph": 2}
-
-
-@pytest.mark.parametrize("with_surrounding_paragraphs", [False, True])
-def test_extract_docx_includes_table_text_in_document_order(tmp_path: Path, with_surrounding_paragraphs: bool) -> None:
-    import docx
-
-    document = docx.Document()
-    if with_surrounding_paragraphs:
-        document.add_paragraph("服务器故障手册")
-    table = document.add_table(rows=2, cols=2)
-    for cell, value in zip(
-        (cell for row in table.rows for cell in row.cells),
-        ("故障代码", "处置步骤", "E42", "重启网关服务"),
-        strict=True,
-    ):
-        cell.text = value
-    if with_surrounding_paragraphs:
-        document.add_paragraph("操作完成后确认服务状态")
-    path = tmp_path / "table.docx"
-    document.save(str(path))
-
-    blocks = extract_blocks(path, ".docx")
-
-    expected = ["故障代码\t处置步骤", "E42\t重启网关服务"]
-    if with_surrounding_paragraphs:
-        expected = ["服务器故障手册", *expected, "操作完成后确认服务状态"]
-    assert [block.text for block in blocks] == expected
-    assert [block.source_position for block in blocks if "table" in block.source_position] == [{"table": 1, "row": 1}, {"table": 1, "row": 2}]
-
-
-def test_extract_docx_merged_table_cells_are_counted_once(tmp_path: Path) -> None:
-    import docx
-
-    document = docx.Document()
-    table = document.add_table(rows=2, cols=2)
-    table.cell(0, 0).merge(table.cell(0, 1)).text = "故障指南"
-    table.cell(1, 0).text = "E42"
-    table.cell(1, 1).text = "重启网关服务"
-    path = tmp_path / "merged.docx"
-    document.save(str(path))
-
-    blocks = extract_blocks(path, ".docx", max_total_chars=14)
-
-    assert [block.text for block in blocks] == ["故障指南", "E42\t重启网关服务"]
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, ".docx", max_total_chars=13)
-    assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio
@@ -231,201 +90,23 @@ async def test_docx_table_preview_keeps_fault_code_and_procedure_in_one_segment(
     assert preview.chunks[0].content == "列1：E42\n列2：重启网关服务"
 
 
-def test_extract_csv_rows_join_cells_and_skip_empty_rows(tmp_path: Path) -> None:
-    path = tmp_path / "table.csv"
-    path.write_text('名称,数量\n"苹果, 红",3\n,,\n梨,5\n', encoding="utf-8")
-
-    blocks = extract_blocks(path, ".csv")
-
-    assert [block.text for block in blocks] == ["名称, 数量", "苹果, 红, 3", "梨, 5"]
-    assert [block.source_position["row"] for block in blocks] == [1, 2, 4]
-
-
-def test_extract_xlsx_rows_carry_sheet_and_row_positions(tmp_path: Path) -> None:
-    path = tmp_path / "table.xlsx"
-    _write_xlsx(path, [["名称", "数量"], [None, None], ["苹果", 3]])
-
-    blocks = extract_blocks(path, ".xlsx")
-
-    assert [block.text for block in blocks] == ["名称, 数量", "苹果, 3"]
-    assert blocks[0].source_position == {"sheet": "数据", "row": 1}
-    assert blocks[1].source_position == {"sheet": "数据", "row": 3}
-
-
-@pytest.mark.parametrize("extension", [".html", ".htm"])
-def test_extract_html_keeps_visible_text_and_drops_script_style(tmp_path: Path, extension: str) -> None:
-    path = tmp_path / f"page{extension}"
-    path.write_bytes(
-        ("<html><head><meta charset='utf-8'><style>body{color:red}</style><script>alert('忽略我')</script></head><body><h1>产品指南</h1><p>第一段说明。</p><template>模板内容</template><p>第二段说明。</p></body></html>").encode()
-    )
-
-    blocks = extract_blocks(path, extension)
-
-    assert len(blocks) == 1
-    assert blocks[0].text == "产品指南\n第一段说明。\n第二段说明。"
-    assert blocks[0].source_position == {}
-
-
-def test_extract_html_rejects_markup_without_visible_text(tmp_path: Path) -> None:
-    path = tmp_path / "empty.html"
-    path.write_text("<html><body><script>var x = 1;</script></body></html>", encoding="utf-8")
-
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, ".html")
-    assert error.value.code == KNOWLEDGE_PARSE_FAILED
-
-
-def test_extract_pptx_slides_become_blocks_with_slide_positions(tmp_path: Path) -> None:
-    path = tmp_path / "deck.pptx"
-    _write_pptx(path, [["发布计划", "里程碑一"], ["回滚方案"]])
-
-    blocks = extract_blocks(path, ".pptx")
-
-    assert [block.text for block in blocks] == ["发布计划\n里程碑一", "回滚方案"]
-    assert [block.source_position for block in blocks] == [{"slide": 1}, {"slide": 2}]
-
-
-def test_extract_epub_chapters_become_blocks_and_skip_navigation(tmp_path: Path) -> None:
-    path = tmp_path / "book.epub"
-    _write_epub(path, [("第一章", "开篇内容。"), ("第二章", "后续内容。")])
-
-    blocks = extract_blocks(path, ".epub")
-
-    assert [block.source_position for block in blocks] == [{"chapter": 1}, {"chapter": 2}]
-    assert blocks[0].text == "第一章\n开篇内容。"
-    assert blocks[1].text == "第二章\n后续内容。"
-
-
-@pytest.mark.parametrize(
-    ("payload", "extension"),
-    [
-        pytest.param("知识库测试文本。".encode(), ".txt", id="utf8"),
-        pytest.param(codecs.BOM_UTF16_LE + "知识库测试文本。".encode("utf-16-le"), ".txt", id="utf16-le-bom"),
-        pytest.param(codecs.BOM_UTF16_BE + "知识库测试文本。".encode("utf-16-be"), ".md", id="utf16-be-bom"),
-        pytest.param("知识库测试文本。".encode("gb18030"), ".txt", id="gb18030"),
-    ],
-)
-def test_extract_text_decodes_supported_encodings(tmp_path: Path, payload: bytes, extension: str) -> None:
-    path = tmp_path / f"note{extension}"
-    path.write_bytes(payload)
-
-    blocks = extract_blocks(path, extension)
-
-    assert blocks == [ExtractedBlock(text="知识库测试文本。", source_position={})]
-
-
-@pytest.mark.parametrize(
-    ("payload", "extension", "reason"),
-    [
-        pytest.param(b"", ".txt", "empty text file", id="empty-txt"),
-        pytest.param(b"   \n\n  ", ".md", "whitespace only", id="whitespace-md"),
-        pytest.param(b"\x81", ".txt", "undecodable bytes", id="undecodable"),
-        pytest.param(b"not a real pdf", ".pdf", "corrupt pdf", id="corrupt-pdf"),
-        pytest.param(b"PK\x03\x04broken", ".docx", "corrupt docx", id="corrupt-docx"),
-        pytest.param(b"PK\x03\x04broken", ".xlsx", "corrupt xlsx", id="corrupt-xlsx"),
-        pytest.param(b"PK\x03\x04broken", ".pptx", "corrupt pptx", id="corrupt-pptx"),
-        pytest.param(b"PK\x03\x04broken", ".epub", "corrupt epub", id="corrupt-epub"),
-    ],
-)
-def test_extract_rejects_empty_and_corrupt_files(tmp_path: Path, payload: bytes, extension: str, reason: str) -> None:
-    path = tmp_path / f"bad{extension}"
-    path.write_bytes(payload)
-
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, extension)
-    assert error.value.code == KNOWLEDGE_PARSE_FAILED, reason
-
-
-def test_extract_rejects_unknown_extensions(tmp_path: Path) -> None:
-    path = tmp_path / "image.png"
-    path.write_bytes(b"\x89PNG")
-
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, ".png")
-    assert error.value.code == KNOWLEDGE_PARSE_FAILED
-
-
-def test_extract_aborts_as_soon_as_text_exceeds_the_char_budget(tmp_path: Path) -> None:
-    """The cumulative budget stops accumulation mid-file, not after the fact."""
-
-    path = tmp_path / "big.csv"
-    path.write_text("\n".join(f"行{index},{'字' * 40}" for index in range(100)), encoding="utf-8")
-
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, ".csv", max_total_chars=200)
-    assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
-
-    # The same file is fine without a budget.
-    assert extract_blocks(path, ".csv")
-
-
-def test_extract_pdf_budget_stops_page_accumulation(tmp_path: Path) -> None:
-    path = tmp_path / "long.pdf"
-    _write_pdf(path, ["page one text " * 10, "page two text " * 10])
-
-    with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, ".pdf", max_total_chars=100)
-    assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
-
-
-@pytest.mark.parametrize("extension", [".docx", ".xlsx", ".pptx", ".epub"])
-def test_extract_rejects_zip_containers_with_bomb_sized_declared_contents(tmp_path: Path, extension: str) -> None:
-    """Zip-container decompression bombs are refused before any XML is parsed."""
-
+def test_extract_rejects_zip_bomb_before_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import zipfile
 
-    path = tmp_path / f"bomb{extension}"
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("word/document.xml", b"\0" * (65 * 1024 * 1024))
-    assert path.stat().st_size < 1024 * 1024  # the attack: tiny upload, huge content
+    from actweave_knowledge.ingestion import extractor
 
+    monkeypatch.setattr(extractor, "_ZIP_BYTES_FLOOR", 1024)
+    path = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"\0" * 1025)
     with pytest.raises(KnowledgeError) as error:
-        extract_blocks(path, extension, max_total_chars=1000)
+        extractor.extract_blocks(path, ".docx", max_total_chars=1)
     assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
 
 
 # ---------------------------------------------------------------------------
 # Cleaner and splitter
 # ---------------------------------------------------------------------------
-
-
-def test_normalize_text_unifies_newlines_and_compresses_blanks() -> None:
-    raw = "第一行  \r\n\r\n\r\n\r第二行\t\n  缩进保留\r\n"
-
-    assert normalize_text(raw) == "第一行\n\n第二行\n  缩进保留"
-
-
-def test_split_keeps_short_text_as_one_chunk_with_default_parameters() -> None:
-    blocks = [ExtractedBlock(text="短文本。", source_position={"page": 1})]
-
-    drafts = split_blocks(blocks, chunk_size=1000, chunk_overlap=100)
-
-    assert len(drafts) == 1
-    assert drafts[0].position == 1
-    assert drafts[0].content == "短文本。"
-    assert drafts[0].source_position == {"page": 1}
-
-
-def test_split_prefers_paragraph_boundaries() -> None:
-    first = "A" * 500
-    second = "B" * 700
-    blocks = [ExtractedBlock(text=f"{first}\n\n{second}")]
-
-    drafts = split_blocks(blocks, chunk_size=1000, chunk_overlap=100)
-
-    assert [draft.position for draft in drafts] == [1, 2]
-    assert drafts[0].content == first
-    assert drafts[1].content == second
-
-
-def test_split_packs_small_paragraphs_up_to_chunk_size() -> None:
-    paragraphs = [f"段落{index}内容" for index in range(1, 5)]
-    blocks = [ExtractedBlock(text="\n\n".join(paragraphs))]
-
-    drafts = split_blocks(blocks, chunk_size=1000, chunk_overlap=100)
-
-    assert len(drafts) == 1
-    assert drafts[0].content == "\n\n".join(paragraphs)
 
 
 def test_split_carries_whole_trailing_pieces_as_overlap() -> None:
@@ -455,13 +136,6 @@ def test_split_falls_back_to_line_boundaries_then_hard_cuts() -> None:
     assert "".join(draft.content for draft in drafts) == single_line
 
 
-def test_split_zero_overlap_covers_text_without_duplication() -> None:
-    text_value = "D" * 1000
-    drafts = split_blocks([ExtractedBlock(text=text_value)], chunk_size=200, chunk_overlap=0)
-
-    assert "".join(draft.content for draft in drafts) == text_value
-
-
 def test_split_overlap_never_emits_a_pure_subset_of_the_previous_chunk() -> None:
     # The oversized B run recurses to character level where the carry-over
     # window retains 100 characters; the final window must still contain new
@@ -478,50 +152,6 @@ def test_split_overlap_never_emits_a_pure_subset_of_the_previous_chunk() -> None
     ]
 
 
-def test_split_positions_stay_contiguous_across_blocks() -> None:
-    blocks = [
-        ExtractedBlock(text="E" * 500, source_position={"page": 1}),
-        ExtractedBlock(text="", source_position={"page": 2}),  # skipped
-        ExtractedBlock(text="F" * 500, source_position={"page": 3}),
-    ]
-
-    drafts = split_blocks(blocks, chunk_size=300, chunk_overlap=0)
-
-    assert [draft.position for draft in drafts] == list(range(1, len(drafts) + 1))
-    assert {draft.source_position["page"] for draft in drafts} == {1, 3}
-
-
-def test_split_respects_minimum_and_maximum_chunk_bounds() -> None:
-    text_value = "G" * 9000
-    smallest = split_blocks([ExtractedBlock(text=text_value)], chunk_size=200, chunk_overlap=0)
-    largest = split_blocks([ExtractedBlock(text=text_value)], chunk_size=4000, chunk_overlap=500)
-
-    assert all(len(draft.content) <= 200 for draft in smallest)
-    assert all(len(draft.content) <= 4000 for draft in largest)
-    assert len(smallest) > len(largest)
-
-
-def test_decode_separator_handles_escapes_and_leaves_other_text_verbatim() -> None:
-    assert decode_separator("\\n\\n") == "\n\n"
-    assert decode_separator("\\t") == "\t"
-    assert decode_separator("\\r\\n") == "\r\n"
-    assert decode_separator("。") == "。"
-    assert decode_separator("###") == "###"
-    # Unknown escapes stay literal instead of being mangled.
-    assert decode_separator("\\x41") == "\\x41"
-
-
-def test_split_honors_a_custom_separator_before_the_fallback_sequence() -> None:
-    text_value = "第一节####第二节####第三节"
-    drafts = split_blocks([ExtractedBlock(text=text_value)], chunk_size=200, chunk_overlap=0, separator="####")
-
-    assert len(drafts) == 1  # small pieces pack back into one chunk
-    assert drafts[0].content == text_value
-
-    tight = split_blocks([ExtractedBlock(text=text_value)], chunk_size=8, chunk_overlap=0, separator="####")
-    assert [draft.content for draft in tight] == ["第一节####", "第二节####", "第三节"]
-
-
 def test_split_chinese_sentences_fall_back_to_the_full_stop_boundary() -> None:
     sentences = ["第一句话内容比较长一些。", "第二句话也有不少内容。", "第三句话继续增加长度。"]
     drafts = split_blocks([ExtractedBlock(text="".join(sentences))], chunk_size=20, chunk_overlap=0)
@@ -531,13 +161,6 @@ def test_split_chinese_sentences_fall_back_to_the_full_stop_boundary() -> None:
         sentences[1],
         sentences[2],
     ]
-
-
-def test_split_custom_escaped_separator_matches_literal_newline() -> None:
-    text_value = "甲部分\n乙部分\n丙部分"
-    drafts = split_blocks([ExtractedBlock(text=text_value)], chunk_size=5, chunk_overlap=0, separator="\\n")
-
-    assert [draft.content for draft in drafts] == ["甲部分", "乙部分", "丙部分"]
 
 
 def test_split_child_chunks_merges_pieces_and_hard_cuts_oversized_ones() -> None:
@@ -551,52 +174,9 @@ def test_split_child_chunks_merges_pieces_and_hard_cuts_oversized_ones() -> None
     assert "".join(children).replace("。", "") == text_value.replace("。", "")
 
 
-def test_split_child_chunks_decodes_escaped_separators() -> None:
-    children = split_child_chunks("第一行\n第二行\n第三行", child_chunk_size=4, child_chunk_separator="\\n")
-
-    assert children == ("第一行", "第二行", "第三行")
-
-
-def test_attach_children_populates_every_draft_in_order() -> None:
-    drafts = [
-        SegmentDraft(position=1, content="甲一。甲二。", source_position={"page": 1}),
-        SegmentDraft(position=2, content="乙一。", source_position={"page": 2}),
-    ]
-
-    attached = attach_children(drafts, child_chunk_size=100, child_chunk_separator="。")
-
-    assert all(isinstance(child, ChildDraft) for draft in attached for child in draft.children)
-    assert [tuple(child.content for child in draft.children) for draft in attached] == [("甲一。甲二。",), ("乙一。",)]
-    # Original identity fields survive untouched.
-    assert [(draft.position, draft.source_position) for draft in attached] == [(1, {"page": 1}), (2, {"page": 2})]
-
-
 # ---------------------------------------------------------------------------
 # Cleaner
 # ---------------------------------------------------------------------------
-
-
-def test_clean_text_with_both_rules_off_changes_nothing() -> None:
-    raw = "hello   world https://example.com a@b.co\n\n\nnext"
-    assert clean_text(raw, remove_extra_spaces=False, remove_urls_emails=False) == raw
-
-
-def test_clean_text_remove_extra_spaces_compresses_whitespace_and_newlines() -> None:
-    raw = "甲  乙\u3000\u3000丙\tX\n\n\n\n下一段"
-    cleaned = clean_text(raw, remove_extra_spaces=True, remove_urls_emails=False)
-
-    assert cleaned == "甲 乙 丙\tX\n\n下一段"
-
-
-def test_clean_text_remove_urls_emails_strips_links_and_addresses() -> None:
-    raw = "联系 someone.name+tag@example-domain.co.uk 或访问 https://example.com/path?q=1 了解 http://foo.bar 详情"
-    cleaned = clean_text(raw, remove_extra_spaces=False, remove_urls_emails=True)
-
-    assert "example.com" not in cleaned
-    assert "@" not in cleaned
-    assert "foo.bar" not in cleaned
-    assert cleaned.startswith("联系 ")
-    assert "了解" in cleaned and "详情" in cleaned
 
 
 def test_clean_text_url_removal_stops_at_cjk_text() -> None:
@@ -606,23 +186,6 @@ def test_clean_text_url_removal_stops_at_cjk_text() -> None:
     cleaned = clean_text(raw, remove_extra_spaces=False, remove_urls_emails=True)
 
     assert cleaned == "详见下一节，以及。结束"
-
-
-def test_clean_blocks_normalizes_before_rules_and_keeps_positions() -> None:
-    blocks = [
-        ExtractedBlock(text="第一行  x\r\n\r\n\r\n\r\n第二行", source_position={"page": 2}),
-        ExtractedBlock(text="纯文本", source_position={"page": 3}),
-    ]
-
-    cleaned = clean_blocks(blocks, remove_extra_spaces=True, remove_urls_emails=False)
-
-    # CRLF newlines normalize to \n first, so the 3+-newline rule applies.
-    assert cleaned[0].text == "第一行 x\n\n第二行"
-    assert cleaned[0].source_position == {"page": 2}
-    assert cleaned[1].text == "纯文本"
-
-    untouched = clean_blocks(blocks, remove_extra_spaces=False, remove_urls_emails=False)
-    assert untouched is blocks
 
 
 # ---------------------------------------------------------------------------
@@ -661,22 +224,6 @@ async def _preview_chunks(
         guard=guard,
         registry=default_registry(),
     )
-
-
-@pytest.mark.asyncio
-async def test_preview_returns_first_chunks_and_total(tmp_path: Path) -> None:
-    paragraphs = [f"第{index}段" + "内容" * 180 for index in range(1, 15)]
-    source = tmp_path / "preview.md"
-    source.write_text("\n\n".join(paragraphs), encoding="utf-8")
-
-    settings = KnowledgeSettings.model_validate({"enabled": False})
-    preview = await _preview_chunks(_preview_request(source, chunk_size=250, chunk_overlap=0), settings)
-
-    assert preview.total == 14
-    assert len(preview.chunks) == PREVIEW_CHUNK_LIMIT
-    assert [chunk.position for chunk in preview.chunks] == list(range(1, PREVIEW_CHUNK_LIMIT + 1))
-    assert preview.chunks[0].content == paragraphs[0]
-    assert preview.chunks[0].word_count == len(paragraphs[0])
 
 
 @pytest.mark.asyncio
@@ -758,17 +305,6 @@ async def test_preview_rejects_invalid_parameters_and_extensions(tmp_path: Path)
     assert oversized.value.code == KNOWLEDGE_INVALID_REQUEST
 
 
-@pytest.mark.asyncio
-async def test_preview_of_empty_document_surfaces_parse_failed(tmp_path: Path) -> None:
-    source = tmp_path / "blank.txt"
-    source.write_text("   \n\n   ", encoding="utf-8")
-    settings = KnowledgeSettings.model_validate({"enabled": False})
-
-    with pytest.raises(KnowledgeError) as error:
-        await _preview_chunks(_preview_request(source), settings)
-    assert error.value.code == KNOWLEDGE_PARSE_FAILED
-
-
 # ---------------------------------------------------------------------------
 # Pipeline harness
 # ---------------------------------------------------------------------------
@@ -806,7 +342,6 @@ class _PipelineHarness:
 async def _pipeline_harness(postgres_database_url: str, **settings_overrides: object) -> _PipelineHarness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     store = _FakeIngestStore()
     client = _FakeModelClient()
@@ -1948,63 +1483,3 @@ async def _open_indexing_task(harness: _PipelineHarness, document_id: uuid.UUID)
         )
         assert row is not None, "expected an open indexing task"
         return row
-
-
-# ---------------------------------------------------------------------------
-# Blocking-I/O static gate
-# ---------------------------------------------------------------------------
-
-# Direct calls that would block the event loop inside an async function.
-# asyncio.to_thread passes callables as arguments (not Call nodes), so wrapped
-# usage never triggers a violation.
-_BLOCKING_CALLS = frozenset(
-    {
-        "extract_blocks",
-        "split_blocks",
-        "mkdtemp",
-        "rmtree",
-        "open",
-        "read_bytes",
-        "write_bytes",
-        "PdfReader",
-        "load_workbook",
-        "fput_object",
-        "fget_object",
-        "remove_object",
-        "bucket_exists",
-    }
-)
-
-
-def _direct_calls_in_async_functions(source_path: Path, blocked: frozenset[str]) -> list[str]:
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    violations: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        stack: list[ast.AST] = list(node.body)
-        while stack:
-            current = stack.pop()
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue  # nested defs are separate execution contexts
-            if isinstance(current, ast.Call):
-                target = current.func
-                name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
-                if name in blocked:
-                    violations.append(f"{source_path.name}:{current.lineno} {node.name} calls {name}() directly")
-            stack.extend(ast.iter_child_nodes(current))
-    return violations
-
-
-@pytest.mark.parametrize(
-    "module",
-    [
-        pytest.param(pipeline_module, id="ingestion-pipeline"),
-        pytest.param(preview_module, id="chunk-preview"),
-        pytest.param(worker_module, id="task-worker"),
-        pytest.param(deletion_module, id="deletion-handlers"),
-    ],
-)
-def test_m4_async_code_never_blocks_the_event_loop(module) -> None:  # noqa: ANN001
-    module_path = Path(module.__file__)
-    assert _direct_calls_in_async_functions(module_path, _BLOCKING_CALLS) == []

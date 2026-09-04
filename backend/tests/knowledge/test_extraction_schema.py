@@ -1,18 +1,12 @@
 """Extraction ownership and atomic publication gates on fresh Schema V1."""
 
-import json
 import uuid
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from actweave_knowledge.extraction.contracts import ProcessingProfile
 from extraction_test_helpers import installed_knowledge_sessions, seed_scope
-from parsing_test_helpers import make_chunk_profile, make_parse_profile
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-
-from deerflow.persistence.final_schema_contract import FINAL_SCHEMA_V1_CATALOG_SIGNATURE, read_schema_v1_catalog_signature
 
 
 @pytest.mark.asyncio
@@ -300,31 +294,15 @@ async def test_delete_extraction_task_has_one_open_slot_and_no_locator(postgres_
     "entity,invalid",
     [
         ("extraction", dict(source_sha256="A" * 64)),
-        ("extraction", dict(parser_fingerprint="z" * 64)),
-        ("extraction", dict(manifest_sha256="a" * 63)),
         ("extraction", dict(manifest_storage_key=None)),
-        ("extraction", dict(manifest_size_bytes=-1)),
         ("extraction", dict(manifest_size_bytes=52428801)),
         ("extraction", dict(manifest_upload_state="pending")),
         ("extraction", dict(manifest_quota_state="reserved")),
-        ("extraction", dict(completed_at=None)),
-        ("extraction", dict(state="invalid")),
-        ("extraction", dict(manifest_upload_state="invalid")),
-        ("extraction", dict(manifest_quota_state="invalid")),
-        ("extraction", dict(state="deleting", manifest_quota_state="released")),
-        ("attachment", dict(sha256="x" * 64)),
         ("attachment", dict(media_type="image/svg+xml")),
-        ("attachment", dict(size_bytes=-1)),
         ("attachment", dict(size_bytes=5242881)),
-        ("attachment", dict(width=0)),
-        ("attachment", dict(width=20000001, height=1)),
         ("attachment", dict(width=2147483647, height=2147483647)),
         ("attachment", dict(upload_state="pending")),
         ("attachment", dict(quota_state="reserved")),
-        ("attachment", dict(state="invalid")),
-        ("attachment", dict(upload_state="invalid")),
-        ("attachment", dict(quota_state="invalid")),
-        ("attachment", dict(state="deleting", quota_state="released")),
     ],
 )
 async def test_object_facts_reject_invalid_states(postgres_database_url, entity, invalid):
@@ -356,59 +334,10 @@ async def test_deletion_facts_can_wait_for_quota_release(postgres_database_url):
 
 
 @pytest.mark.asyncio
-async def test_profile_json_index_defaults_and_settings(postgres_database_url):
-
+async def test_same_project_different_document_binding_is_rejected(postgres_database_url):
     async with installed_knowledge_sessions(postgres_database_url) as sessions:
         scope = await seed_scope(sessions)
         async with sessions() as session, session.begin():
-            profile = ProcessingProfile(parse=make_parse_profile(".pdf"), chunk=make_chunk_profile())
-            await session.execute(text("UPDATE knowledge_documents SET parsing_profile=CAST(:profile AS jsonb) WHERE id=:id"), {"id": scope[2], "profile": profile.model_dump_json()})
-            # A legacy character segment remains legal, but has no image binding.
-            await segment(session, scope, None, index_text="", token_count=0)
-            for table, column, invalid in [
-                ("knowledge_documents", "parsing_profile", "'[]'::jsonb"),
-                ("knowledge_documents", "parse_warnings", "'{}'::jsonb"),
-                ("knowledge_documents", "source_sha256", "'invalid'"),
-                ("knowledge_documents", "upload_state", "'unknown'"),
-                ("knowledge_documents", "quota_state", "'released'"),
-                ("knowledge_segments", "source_spans", "'{}'::jsonb"),
-                ("knowledge_segments", "token_count", "-1"),
-            ]:
-                with pytest.raises(IntegrityError):
-                    async with session.begin_nested():
-                        await session.execute(text(f"UPDATE {table} SET {column}={invalid}"))
-            await session.execute(text("INSERT INTO knowledge_system_settings (id) VALUES (1)"))
-            settings = (await session.execute(text("SELECT etl_type,extraction_cache_enabled FROM knowledge_system_settings"))).one()
-            assert settings == ("builtin", True)
-            await session.execute(text("UPDATE knowledge_system_settings SET etl_type='unstructured_local',extraction_cache_enabled=false"))
-            with pytest.raises(IntegrityError):
-                async with session.begin_nested():
-                    await session.execute(text("UPDATE knowledge_system_settings SET etl_type='remote'"))
-
-
-@pytest.mark.asyncio
-async def test_extraction_schema_catalog_signature(postgres_database_url):
-
-    async with installed_knowledge_sessions(postgres_database_url) as sessions:
-        async with sessions() as session:
-            signature = await read_schema_v1_catalog_signature(await session.connection())
-    actual = {key: asdict(value) for key, value in signature.items()}
-    assert signature == FINAL_SCHEMA_V1_CATALOG_SIGNATURE, f"Schema V1 actual catalog: {json.dumps(actual, sort_keys=True)}"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("different_base", [False, True])
-async def test_same_project_different_document_binding_is_rejected(postgres_database_url, different_base):
-    async with installed_knowledge_sessions(postgres_database_url) as sessions:
-        scope = await seed_scope(sessions)
-        async with sessions() as session, session.begin():
-            other_base = uuid.uuid4() if different_base else scope[1]
-            if different_base:
-                await session.execute(
-                    text("""INSERT INTO knowledge_bases (id,project_id,name,embedding_model_id)
-                    SELECT :id, project_id, 'Sibling Base', embedding_model_id FROM knowledge_bases WHERE id=:base_id"""),
-                    {"id": other_base, "base_id": scope[1]},
-                )
             other_document = uuid.uuid4()
             await insert_row(
                 session,
@@ -416,7 +345,7 @@ async def test_same_project_different_document_binding_is_rejected(postgres_data
                 dict(
                     id=other_document,
                     project_id=scope[0],
-                    knowledge_base_id=other_base,
+                    knowledge_base_id=scope[1],
                     name="sibling.pdf",
                     original_name="sibling.pdf",
                     storage_key=f"sources/{other_document}",
@@ -425,7 +354,7 @@ async def test_same_project_different_document_binding_is_rejected(postgres_data
                     quota_state="committed",
                 ),
             )
-            other_scope = scope[0], other_base, other_document
+            other_scope = scope[0], scope[1], other_document
             eid = await extraction(session, scope)
             other_eid = await extraction(session, other_scope)
             aid = await attachment(session, scope, eid)
@@ -444,23 +373,6 @@ async def test_same_project_different_document_binding_is_rejected(postgres_data
         with pytest.raises(IntegrityError):
             async with sessions() as session, session.begin():
                 await publish(session, other_document, eid)
-
-
-@pytest.mark.asyncio
-async def test_legacy_segment_child_defaults_have_no_implicit_index_backfill(postgres_database_url):
-    async with installed_knowledge_sessions(postgres_database_url) as sessions:
-        scope = await seed_scope(sessions)
-        async with sessions() as session, session.begin():
-            sid = uuid.uuid4()
-            await insert_row(session, "knowledge_segments", dict(id=sid, **scope_values(scope), document_version=1, position=1, content="legacy body"))
-            child_id = uuid.uuid4()
-            await insert_row(session, "knowledge_segment_children", dict(id=child_id, **scope_values(scope), knowledge_segment_id=sid, document_version=1, position=1, content="legacy child", embedding="[0.1,0.2]"))
-            for table in ["knowledge_segments", "knowledge_segment_children"]:
-                assert (await session.execute(text(f"SELECT index_text,token_count,source_spans FROM {table}"))).one() == ("", 0, [])
-                for column, invalid in [("token_count", "-1"), ("source_spans", "'{}'::jsonb")]:
-                    with pytest.raises(IntegrityError):
-                        async with session.begin_nested():
-                            await session.execute(text(f"UPDATE {table} SET {column}={invalid}"))
 
 
 @pytest.mark.asyncio

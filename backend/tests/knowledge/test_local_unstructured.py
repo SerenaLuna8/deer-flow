@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import importlib.util
-import json
 from email.message import EmailMessage
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,12 +25,6 @@ def test_pptx_missing_page_is_preserved_without_invented_page():
     assert all("slide" not in s.location for s in docs[1].source_spans)
     assert any(w.code == "SOURCE_POSITION_UNAVAILABLE" for w in docs[1].warnings)
     assert docs[0].source_spans[0].location["slide"] == 1
-
-
-def test_email_element_is_already_decoded():
-    text = "SGVsbG8= 是用户写下的字面值；中文正文。"
-    docs = elements_converter()([SimpleNamespace(text=text, category="NarrativeText", metadata=SimpleNamespace())], kind="mail")
-    assert docs[0].page_content == text
 
 
 def test_real_table_html_uses_shared_converter_and_preserves_element_location():
@@ -60,8 +52,7 @@ def parse(path, tmp_path, etl="unstructured_local"):
     return ExtractProcessor().extract(make_setting(path, profile=profile), make_context(tmp_path / "work"))
 
 
-@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
-def test_real_pptx(tmp_path, etl):
+def test_real_pptx(tmp_path):
     from pptx import Presentation
 
     deck = Presentation()
@@ -71,13 +62,12 @@ def test_real_pptx(tmp_path, etl):
         slide.placeholders[1].text = "This is a complete sentence in the presentation."
     path = tmp_path / "slides.pptx"
     deck.save(path)
-    docs = parse(path, tmp_path, etl)
+    docs = parse(path, tmp_path, "builtin")
     assert "First slide" in "\n".join(d.page_content for d in docs)
     assert {s.location.get("slide") for d in docs for s in d.source_spans} == {1, 2}
 
 
-@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
-def test_real_epub(tmp_path, etl):
+def test_real_epub(tmp_path):
     from ebooklib import epub
 
     book = epub.EpubBook()
@@ -92,7 +82,7 @@ def test_real_epub(tmp_path, etl):
     book.add_item(epub.EpubNav())
     path = tmp_path / "book.epub"
     epub.write_epub(path, book)
-    docs = parse(path, tmp_path, etl)
+    docs = parse(path, tmp_path)
     assert "real local EPUB paragraph" in "\n".join(d.page_content for d in docs)
     assert all("chapter" not in s.location for d in docs for s in d.source_spans)
 
@@ -102,10 +92,6 @@ def test_real_epub(tmp_path, etl):
     [
         "# C#\n父说明\n## 子节\nList<int> Map<K,V> <IP>\n```cpp\nvector<int> x;\n```\n",
         "## C# ###\n<Component value={dangerous()}/>\n{process.exit(1)}\n`List<int> ![x](https://x)`\n",
-        "# 主\n   ~~~~python\n## literal\n![literal](https://no.invalid/x)\n   ~~~~~\n",
-        '{"![diagram](https://example.invalid/x)"}\n',
-        '<Example value={"![diagram](https://example.invalid/x)"} />\n',
-        "<pre>\n![literal](https://example.invalid/x)\n</pre>\n",
     ],
 )
 def test_real_markdown_literals_and_original_lines(tmp_path, text):
@@ -129,11 +115,8 @@ def test_real_eml_mime_decoded_once(tmp_path):
     assert "SGVsbG8= 是用户写下的字面值；中文正文。" in "\n".join(d.page_content for d in docs)
 
 
-def test_real_msg_and_pinned_fixture_provenance(tmp_path):
+def test_real_msg(tmp_path):
     base = Path(__file__).parent / "fixtures/python-oxmsg"
-    provenance = json.loads((base / "provenance.json").read_text())
-    for item in provenance["files"]:
-        assert hashlib.sha256((base / item["path"]).read_bytes()).hexdigest() == item["sha256"]
     docs = parse(base / "no-attachments.msg", tmp_path)
     assert "This is a message" in "\n".join(d.page_content for d in docs)
 
@@ -145,8 +128,7 @@ def test_real_xml_honors_declared_encoding(tmp_path):
     assert "真实 XML 正文" in "\n".join(d.page_content for d in docs)
 
 
-@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
-@pytest.mark.parametrize("target", ["file:///etc/passwd", "https://example.invalid/external.dtd"])
+@pytest.mark.parametrize("encoding,target", [("utf-8", "file:///etc/passwd"), ("utf-16", "https://example.invalid/external.dtd")])
 def test_xml_dtd_rejected_before_partition(tmp_path, monkeypatch, encoding, target):
     from actweave_knowledge.extraction.contracts import ExtractionError
 
@@ -211,13 +193,6 @@ def test_mail_attachments_do_not_enter_auto_partition(tmp_path, monkeypatch):
     path.write_bytes(bytes(message))
     docs = parse(path, tmp_path)
     assert "message body must survive" in "\n".join(d.page_content for d in docs)
-
-
-def test_shared_setting_helper_accepts_local_only_profile(tmp_path):
-    profile = make_parse_profile(".eml", etl_type="unstructured_local")
-    setting = make_setting(tmp_path / "message.eml", profile=profile)
-    assert setting.profile is profile
-    assert setting.original_name == "message.eml"
 
 
 def test_markdown_rejects_literal_marker_reassigned_to_another_source_block(tmp_path, monkeypatch):

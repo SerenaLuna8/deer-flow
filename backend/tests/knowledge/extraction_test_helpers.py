@@ -1,4 +1,4 @@
-"""Reusable fresh Schema V1 installation for Extraction integration tests."""
+"""Shared Extraction integration helpers over fixture-prepared Schema V1."""
 
 import asyncio
 import hashlib
@@ -21,15 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.quotas.models import QuotaSourceRef
 from app.quotas.service import QuotaService
 from deerflow.config.quota_config import QuotaConfig
-from deerflow.persistence.bootstrap import _install_full_schema
 
 
 @asynccontextmanager
 async def installed_knowledge_sessions(url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Install only in the disposable database supplied by the pytest fixture."""
+    """Open sessions on the isolated, already installed database fixture."""
     engine = create_async_engine(url)
     try:
-        await _install_full_schema(engine)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()

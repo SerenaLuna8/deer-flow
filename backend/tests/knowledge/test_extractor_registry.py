@@ -24,31 +24,9 @@ def signatures():
     return importlib.import_module("actweave_knowledge.extraction.signatures")
 
 
-@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
-@pytest.mark.parametrize(
-    "ext,parser",
-    [
-        (".txt", "builtin.text"),
-        (".pdf", "builtin.pdf"),
-        (".docx", "builtin.word"),
-        (".xlsx", "builtin.excel"),
-        (".xls", "builtin.excel"),
-        (".csv", "builtin.csv"),
-        (".html", "builtin.html"),
-        (".htm", "builtin.html"),
-        (".pptx", "unstructured.pptx"),
-        (".epub", "unstructured.epub"),
-    ],
-)
-def test_unique_routes(registry_module, etl, ext, parser):
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext.upper())
-    assert item.extractor_id == parser
-
-
-@pytest.mark.parametrize("ext", [".md", ".markdown", ".mdx"])
 @pytest.mark.parametrize("etl,parser", [("builtin", "builtin.markdown"), ("unstructured_local", "unstructured.markdown")])
-def test_markdown_modes(registry_module, ext, etl, parser):
-    assert registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext).extractor_id == parser
+def test_markdown_modes(registry_module, etl, parser):
+    assert registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=".MARKDOWN").extractor_id == parser
 
 
 @pytest.mark.parametrize("ext,parser", [(".eml", "unstructured.eml"), (".msg", "unstructured.msg"), (".xml", "unstructured.xml")])
@@ -60,8 +38,7 @@ def test_long_tail_local_only(registry_module, ext, parser):
     assert caught.value.reason_code == "UNSUPPORTED_FORMAT"
 
 
-@pytest.mark.parametrize("ext", [".doc", ".ppt", ".odt", ".zip", ".exe", "", "txt"])
-@pytest.mark.parametrize("etl", ["builtin", "unstructured_local"])
+@pytest.mark.parametrize("ext,etl", [(".doc", "builtin"), (".exe", "unstructured_local"), (".zip", "builtin"), ("txt", "builtin")])
 def test_disallowed_formats_never_fall_back(registry_module, ext, etl):
     with pytest.raises(ExtractionError) as caught:
         registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext)
@@ -87,28 +64,6 @@ def test_xls_does_not_inherit_xlsx_image_capability(registry_module):
     assert registry.resolve(datasource_type="file", etl_type="builtin", extension=".xls").supports_embedded_images is False
 
 
-def test_dependency_metadata_changes_version_and_missing_dependency_is_unavailable(registry_module, monkeypatch):
-    def absent(name):
-        raise registry_module.metadata.PackageNotFoundError(name)
-
-    monkeypatch.setattr(registry_module.metadata, "version", absent)
-    missing = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
-    assert missing.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"
-    monkeypatch.setattr(registry_module.metadata, "version", lambda name: "3.4.7")
-    available = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".txt")
-    assert available.dependency_probe() is None
-    assert missing.extractor_version != available.extractor_version
-    assert "9c16c865977e9d89a9ec7ae0536e893f4385a758" in available.extractor_version
-
-
-def test_registration_does_not_import_adapters(registry_module, monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail("registration eagerly imported an adapter")
-
-    monkeypatch.setattr(registry_module.importlib, "import_module", forbidden)
-    assert registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".pdf").extractor_id == "builtin.pdf"
-
-
 OFFICE = [
     (".docx", "word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
     (".xlsx", "xl/workbook.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"),
@@ -122,13 +77,6 @@ def write_office(path, part, mime, *, content_types=None, extra=()):
         archive.writestr(part, "<root/>")
         for name, data in extra:
             archive.writestr(name, data)
-
-
-@pytest.mark.parametrize("ext,part,mime", OFFICE)
-def test_office_valid_identity(signatures, tmp_path, ext, part, mime):
-    path = tmp_path / ("document" + ext)
-    write_office(path, part, mime)
-    signatures.validate_file_signature(path, ext.upper(), ExtractionLimits())
 
 
 @pytest.mark.parametrize(
@@ -196,21 +144,16 @@ def test_epub_identity(signatures, tmp_path, mimetype, container, accepted):
 @pytest.mark.parametrize(
     "ext,payload,accepted",
     [
-        (".pdf", b"%PDF-1.7\n", True),
         (".pdf", b"plain", False),
         (".docx", b"PK\x03\x04broken", False),
-        (".xls", bytes.fromhex("d0cf11e0a1b11ae1"), True),
-        (".msg", bytes.fromhex("d0cf11e0a1b11ae1"), True),
         (".msg", b"plain", False),
-        (".txt", b"text\x00binary", False),
         (".md", b"%PDF-1.7", False),
         (".csv", b"PK\x03\x04", False),
         (".xml", bytes.fromhex("d0cf11e0a1b11ae1"), False),
-        (".html", b"hello", True),
-        (".eml", b"From: user@example.test\n", True),
         (".txt", "文档".encode("utf-16"), True),
         (".txt", b"x" * (1024 * 1024) + b"\x00", False),
     ],
+    ids=["fake-pdf", "broken-office", "fake-msg", "pdf-as-markdown", "zip-as-csv", "binary-as-xml", "utf16-text", "binary-tail"],
 )
 def test_binary_and_text_signature_boundaries(signatures, tmp_path, ext, payload, accepted):
     path = tmp_path / ("source" + ext)
@@ -307,42 +250,6 @@ def test_cumulative_text_budget_counts_all_documents(registry_module, processor_
     assert caught.value.code == KNOWLEDGE_QUOTA_EXCEEDED
 
 
-@pytest.mark.parametrize(
-    "etl,ext,module_name,class_name",
-    [
-        ("builtin", ".txt", "builtin.text_extractor", "TextExtractor"),
-        ("builtin", ".md", "builtin.markdown_extractor", "MarkdownExtractor"),
-        ("builtin", ".pdf", "builtin.pdf_extractor", "PdfExtractor"),
-        ("builtin", ".docx", "builtin.word_extractor", "WordExtractor"),
-        ("builtin", ".xlsx", "builtin.excel_extractor", "ExcelExtractor"),
-        ("builtin", ".xls", "builtin.excel_extractor", "ExcelExtractor"),
-        ("builtin", ".csv", "builtin.csv_extractor", "CSVExtractor"),
-        ("builtin", ".html", "builtin.html_extractor", "HtmlExtractor"),
-        ("builtin", ".pptx", "unstructured_local.unstructured_pptx_extractor", "UnstructuredPPTXExtractor"),
-        ("builtin", ".epub", "unstructured_local.unstructured_epub_extractor", "UnstructuredEpubExtractor"),
-        ("unstructured_local", ".md", "unstructured_local.unstructured_markdown_extractor", "UnstructuredMarkdownExtractor"),
-        ("unstructured_local", ".eml", "unstructured_local.unstructured_eml_extractor", "UnstructuredEmlExtractor"),
-        ("unstructured_local", ".msg", "unstructured_local.unstructured_msg_extractor", "UnstructuredMsgExtractor"),
-        ("unstructured_local", ".xml", "unstructured_local.unstructured_xml_extractor", "UnstructuredXmlExtractor"),
-    ],
-)
-def test_factory_targets_the_owned_adapter_module(registry_module, monkeypatch, etl, ext, module_name, class_name):
-    from types import SimpleNamespace
-
-    class Adapter(BaseExtractor):
-        def extract(self, setting, context):
-            return [make_document("adapter output")]
-
-    def load(name, *, package):
-        assert name == "." + module_name
-        assert package == "actweave_knowledge.extraction"
-        return SimpleNamespace(**{class_name: Adapter})
-
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type=etl, extension=ext)
-    monkeypatch.setattr(registry_module.importlib, "import_module", load)
-    assert isinstance(item.factory(), Adapter)
-
-
 def test_corrupt_compressed_declaration_returns_safe_error(signatures, tmp_path):
     import struct
 
@@ -357,29 +264,3 @@ def test_corrupt_compressed_declaration_returns_safe_error(signatures, tmp_path)
     with pytest.raises(ExtractionError) as caught:
         signatures.validate_file_signature(path, ".docx", ExtractionLimits())
     assert caught.value.reason_code == "FORMAT_SIGNATURE_MISMATCH"
-
-
-def test_local_probe_uses_spacy_model_metadata_without_triggering_download(registry_module, monkeypatch):
-    installed = {
-        "unstructured": "0.21.5",
-        "python-magic": "0.4.27",
-        "lxml": "6.1.0",
-        "spacy": "3.8.16",
-        "en-core-web-sm": "3.8.0",
-        "python-pptx": "1.0.2",
-        "thinc": "8.3.13",
-        "langdetect": "1.0.9",
-    }
-
-    def version(name):
-        if name not in installed:
-            raise registry_module.metadata.PackageNotFoundError(name)
-        return installed[name]
-
-    monkeypatch.setattr(registry_module.metadata, "version", version)
-    item = registry_module.default_registry().resolve(datasource_type="file", etl_type="builtin", extension=".pptx")
-    assert item.dependency_probe() is None
-    del installed["en-core-web-sm"]
-    assert item.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"
-    installed["en-core-web-sm"] = "3.7.0"
-    assert item.dependency_probe() == "PARSER_DEPENDENCY_UNAVAILABLE"

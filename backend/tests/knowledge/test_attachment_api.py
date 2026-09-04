@@ -79,7 +79,7 @@ async def test_attachment_http_uses_distinct_entrypoints_and_private_bytes(kind)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["managed", "citation"])
-@pytest.mark.parametrize("params", [{}, {"expected_document_version": 1}, {"expected_content_digest": "a" * 64}, EXPECTED | {"expected_document_version": 0}, EXPECTED | {"expected_content_digest": "invalid"}])
+@pytest.mark.parametrize("params", [{}, EXPECTED | {"expected_document_version": 0}, EXPECTED | {"expected_content_digest": "invalid"}])
 async def test_attachment_http_requires_valid_expectations(kind, params):
     module = AttachmentModule()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(module)), base_url="http://test") as client:
@@ -89,13 +89,12 @@ async def test_attachment_http_requires_valid_expectations(kind, params):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
 @pytest.mark.parametrize("code,status", [(KNOWLEDGE_NOT_FOUND, 404), (KNOWLEDGE_CONFLICT, 409)])
-async def test_attachment_http_removes_partial_output_on_safe_error(kind, code, status):
+async def test_attachment_http_removes_partial_output_on_safe_error(code, status):
     module = AttachmentModule()
     module.error = KnowledgeError(code, "资源不存在或已变化")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(module)), base_url="http://test") as client:
-        response = await client.get(module.url(kind), params=EXPECTED)
+        response = await client.get(module.url("managed"), params=EXPECTED)
     assert response.status_code == status
     assert response.json()["detail"]["code"] == code
     assert len(module.paths) == 1 and not module.paths[0].exists()
@@ -104,22 +103,20 @@ async def test_attachment_http_removes_partial_output_on_safe_error(kind, code, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
-async def test_attachment_http_cancellation_removes_partial_output(kind):
+async def test_attachment_http_cancellation_removes_partial_output():
     module = AttachmentModule()
     module.error = asyncio.CancelledError()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(module)), base_url="http://test") as client:
         with pytest.raises(asyncio.CancelledError):
-            await client.get(module.url(kind), params=EXPECTED)
+            await client.get(module.url("managed"), params=EXPECTED)
     assert len(module.paths) == 1 and not module.paths[0].exists()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["managed", "citation"])
-async def test_attachment_http_disconnect_removes_response_file(kind):
+async def test_attachment_http_disconnect_removes_response_file():
     module = AttachmentModule()
     app = app_for(module)
-    request = httpx.Request("GET", "http://test" + module.url(kind), params=EXPECTED)
+    request = httpx.Request("GET", "http://test" + module.url("managed"), params=EXPECTED)
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.4"},

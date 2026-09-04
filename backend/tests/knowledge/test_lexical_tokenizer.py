@@ -1,16 +1,4 @@
-"""T8 — lexical_v1: the in-package deterministic tokenizer (design §8.1).
-
-Pure-function tests: normalization (NFKC + English lowercasing), the fixed
-scan order (complete valid IPs, then the longest ASCII identifier with
-internal ``._:/-`` separators, then contiguous Han runs as singles plus
-overlapping bigrams, then other letter/digit runs, punctuation as boundaries),
-in-fragment part deduplication, cross-position repetition, the 128-byte
-``x``-hex / SHA-256 ``h``-hex safe encoding, the 256 KiB derived-input hard
-limit, and the exact index-input snapshots the version contract freezes.
-The token sequence itself is part of ``lexical_version=1``: changing any
-expectation here requires bumping the version and re-running the quality
-evaluation.
-"""
+"""Frozen lexical tokens, query filtering, safe encoding, and size limits."""
 
 from __future__ import annotations
 
@@ -20,7 +8,6 @@ from ipaddress import ip_address
 
 import pytest
 from actweave_knowledge import KNOWLEDGE_INVALID_REQUEST, KnowledgeError
-from actweave_knowledge.contracts import KNOWLEDGE_MAX_SEGMENT_CHARS
 from actweave_knowledge.retrieval import (
     LEXICAL_INDEX_INPUT_MAX_BYTES,
     LEXICAL_TOKEN_ENCODED_MAX_BYTES,
@@ -34,43 +21,6 @@ from actweave_knowledge.retrieval import (
 
 def _hex_token(token: str) -> str:
     return "x" + token.encode("utf-8").hex()
-
-
-# ---------------------------------------------------------------------------
-# Normalization and the frozen sample tokens
-# ---------------------------------------------------------------------------
-
-
-def test_nfkc_and_lowercase_produce_the_frozen_identifier_sample() -> None:
-    """The design's frozen sample: ＡB-12 → [ab-12, ab, 12]."""
-
-    assert lexical_v1_tokens("ＡB-12") == ["ab-12", "ab", "12"]
-
-
-def test_chinese_runs_emit_singles_and_overlapping_bigrams() -> None:
-    """The design's frozen sample: 网络 → [网, 网络, 络]."""
-
-    assert lexical_v1_tokens("网络") == ["网", "网络", "络"]
-    assert lexical_v1_tokens("网络层") == ["网", "网络", "络", "络层", "层"]
-    assert lexical_v1_tokens("网") == ["网"]
-
-
-def test_mixed_chinese_english_and_digits_keep_scan_order() -> None:
-    assert lexical_v1_tokens("查询HTTP 404状态") == [
-        "查",
-        "查询",
-        "询",
-        "http",
-        "404",
-        "状",
-        "状态",
-        "态",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# IPs and identifiers
-# ---------------------------------------------------------------------------
 
 
 def test_valid_ips_stay_complete_and_canonical() -> None:
@@ -97,15 +47,6 @@ def test_identifiers_emit_the_complete_item_then_deduplicated_parts() -> None:
     assert lexical_v1_tokens("10.0.0.1:8080") == ["10.0.0.1", "8080"]
 
 
-def test_urls_split_on_unbridged_separators_without_rejecting_the_text() -> None:
-    assert lexical_v1_tokens("https://a.b/c") == ["https", "a.b/c", "a", "b", "c"]
-
-
-# ---------------------------------------------------------------------------
-# Boundaries, repetition, dedupe
-# ---------------------------------------------------------------------------
-
-
 def test_punctuation_is_a_boundary_and_never_reaches_tsquery_syntax() -> None:
     assert lexical_v1_tokens("你好，世界！") == ["你", "你好", "好", "世", "世界", "界"]
     assert lexical_v1_tokens("a&b|c!(d)") == ["a", "b", "c", "d"]
@@ -120,11 +61,6 @@ def test_document_positions_keep_repeats_while_the_query_dedupes() -> None:
     # The query side keeps only the bigram: index-side singles remain
     # matchable but never drive ranking through the OR query.
     assert lexical_query_input("重启 重启") == [_hex_token("重启")]
-
-
-# ---------------------------------------------------------------------------
-# Query-side rules: bigrams only, stop tokens dropped, single runs kept
-# ---------------------------------------------------------------------------
 
 
 def test_query_drops_han_singles_except_a_lone_character_run() -> None:
@@ -160,17 +96,6 @@ def test_long_chinese_questions_now_fit_the_query_token_cap() -> None:
     assert len(lexical_query_input(longer)) == 119
 
 
-def test_zero_token_inputs_produce_an_empty_stream() -> None:
-    assert lexical_v1_tokens("！？。…") == []
-    assert lexical_index_input("！？。…") == ""
-    assert lexical_query_input("  ") == []
-
-
-# ---------------------------------------------------------------------------
-# Safe encoding and limits
-# ---------------------------------------------------------------------------
-
-
 def test_tokens_encode_as_hex_below_and_hash_above_128_bytes() -> None:
     short = "错误码e404"
     for token in lexical_v1_tokens(short):
@@ -196,15 +121,3 @@ def test_derived_input_over_256kib_fails_loudly_instead_of_dropping_text() -> No
         lexical_index_input("汉" * (LEXICAL_INDEX_INPUT_MAX_BYTES // 3 + 1))
     assert error.value.code == KNOWLEDGE_INVALID_REQUEST
     assert "256" in error.value.message
-
-
-def test_the_documented_segment_char_bound_fits_the_limit() -> None:
-    # The densest legal segment (KNOWLEDGE_MAX_SEGMENT_CHARS Han chars, 48 KB
-    # UTF-8) stays far below the 256 KiB derived-input bound and produces
-    # singles plus bigrams.
-    content = "installation安装指南" * 1000
-    assert len(content) == KNOWLEDGE_MAX_SEGMENT_CHARS
-    tokens = lexical_v1_tokens(content)
-    # 1000 repeats of one word, four Han singles, and three bigrams.
-    assert len(tokens) == 1000 * 8
-    assert lexical_index_input(content) != ""

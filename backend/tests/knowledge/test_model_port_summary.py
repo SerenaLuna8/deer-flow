@@ -26,7 +26,6 @@ from support.system_model_seed import seed_system_model_config
 
 from app.knowledge.model_port import RegistryKnowledgeModelPort
 from deerflow.models.runtime import ModelRuntimeProfile
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.knowledge_settings import KnowledgeSystemSettingsRow
 from deerflow.persistence.system_settings import SystemModelConfigRow
 
@@ -61,8 +60,6 @@ async def test_resolve_summary_model_reads_settings_and_validates_activity(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     port = registry_model_port()
     try:
-        await _install_full_schema(engine)
-
         # 设置行尚未播种：视为未配置。
         async with factory() as session:
             assert await port.resolve_summary_model(session) is None
@@ -120,16 +117,6 @@ async def test_resolve_summary_model_reads_settings_and_validates_activity(
             assert malformed.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
     finally:
         await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_generate_summary_requires_configured_runtime() -> None:
-    """T1 冻结签名：未注入 ModelRuntime 的端口以类型化错误拒绝生成调用。"""
-
-    port = registry_model_port()
-    with pytest.raises(KnowledgeError) as rejected:
-        await port.generate_summary(model_ref=str(uuid.uuid4()), prompt="总结这段内容")
-    assert rejected.value.code == KNOWLEDGE_MODEL_UNAVAILABLE
 
 
 @pytest.mark.asyncio

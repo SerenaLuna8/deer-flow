@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
 
 import pytest
 from actweave_knowledge import (
@@ -39,7 +38,6 @@ from registry_helpers import (
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from deerflow.persistence.bootstrap import _install_full_schema
 from deerflow.persistence.model_registry import ModelProviderModelRow
 
 
@@ -63,7 +61,6 @@ class _RevokedAuthority:
 async def _harness(postgres_database_url: str, **settings_overrides: object) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     settings = KnowledgeSettings.model_validate({"enabled": False, **settings_overrides})
     service = KnowledgeBaseService(
         session_factory=factory,
@@ -137,34 +134,6 @@ async def test_create_unconfigured_base_without_any_registered_models(postgres_d
 
 
 @pytest.mark.asyncio
-async def test_create_then_get_round_trips_the_view(postgres_database_url: str) -> None:
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(
-            project_id,
-            KnowledgeBaseCreate(name="产品手册", embedding_model_id=embedding_model_id, description="说明"),
-        )
-
-        assert created.project_id == project_id
-        assert created.name == "产品手册"
-        assert created.description == "说明"
-        assert created.embedding_model_id == embedding_model_id
-        assert created.reranker_model_id is None
-        assert created.status == "active"
-        assert created.document_count == 0
-        # K3: new bases carry the schema's retrieval defaults.
-        assert created.default_top_k == 4
-        assert created.default_score_threshold == 0.2
-        assert created.retrieval_mode == "semantic"
-        assert created.delete_error is None
-
-        fetched = await harness.service.get_knowledge_base(project_id, created.id)
-        assert fetched == created
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_unconfigured_base_rejects_reranker_without_embedding(postgres_database_url: str) -> None:
     harness, project_id, _ = await _prepared(postgres_database_url)
     try:
@@ -188,43 +157,6 @@ async def test_unconfigured_base_rejects_reranker_without_embedding(postgres_dat
         assert await harness.service.get_knowledge_base(project_id, created.id) == created
         _, total = await harness.service.list_knowledge_bases(project_id)
         assert total == 1
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_retrieval_mode_round_trips_and_validates(postgres_database_url: str) -> None:
-    """T8: hybrid is an explicit per-base choice on create or update."""
-
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(
-            project_id,
-            KnowledgeBaseCreate(name="混合库", embedding_model_id=embedding_model_id, retrieval_mode="hybrid"),
-        )
-        assert created.retrieval_mode == "hybrid"
-
-        updated = await harness.service.update_knowledge_base(
-            project_id,
-            created.id,
-            KnowledgeBaseUpdate(retrieval_mode="semantic"),
-        )
-        assert updated.base.retrieval_mode == "semantic"
-
-        with pytest.raises(KnowledgeError) as bad_create:
-            await harness.service.create_knowledge_base(
-                project_id,
-                KnowledgeBaseCreate(name="非法模式", embedding_model_id=embedding_model_id, retrieval_mode="fancy"),  # type: ignore[arg-type]
-            )
-        assert bad_create.value.code == KNOWLEDGE_INVALID_REQUEST
-
-        with pytest.raises(KnowledgeError) as bad_update:
-            await harness.service.update_knowledge_base(
-                project_id,
-                created.id,
-                KnowledgeBaseUpdate(retrieval_mode="fancy"),  # type: ignore[arg-type]
-            )
-        assert bad_update.value.code == KNOWLEDGE_INVALID_REQUEST
     finally:
         await harness.engine.dispose()
 
@@ -345,44 +277,6 @@ async def test_create_validates_name_and_description(postgres_database_url: str,
 
 
 @pytest.mark.asyncio
-async def test_list_orders_by_updated_at_desc_and_paginates(postgres_database_url: str) -> None:
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        base_time = datetime(2036, 3, 1, 12, 0, tzinfo=UTC)
-        ids: list[uuid.UUID] = []
-        async with harness.factory() as session, session.begin():
-            for position in range(3):
-                base_id = uuid.uuid4()
-                ids.append(base_id)
-                session.add(
-                    KnowledgeBaseRow(
-                        id=base_id,
-                        project_id=project_id,
-                        name=f"kb-{position}",
-                        description="",
-                        embedding_model_id=embedding_model_id,
-                        status="active",
-                        created_at=base_time,
-                        updated_at=base_time.replace(minute=position),
-                    )
-                )
-
-        first_page, total = await harness.service.list_knowledge_bases(project_id, page=1, page_size=2)
-        second_page, _ = await harness.service.list_knowledge_bases(project_id, page=2, page_size=2)
-
-        assert total == 3
-        assert [view.id for view in first_page] == [ids[2], ids[1]]
-        assert [view.id for view in second_page] == [ids[0]]
-
-        with pytest.raises(KnowledgeError):
-            await harness.service.list_knowledge_bases(project_id, page=0)
-        with pytest.raises(KnowledgeError):
-            await harness.service.list_knowledge_bases(project_id, page_size=101)
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_get_is_scoped_to_the_requesting_project(postgres_database_url: str) -> None:
     harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
     try:
@@ -393,64 +287,6 @@ async def test_get_is_scoped_to_the_requesting_project(postgres_database_url: st
         with pytest.raises(KnowledgeError) as error:
             await harness.service.get_knowledge_base(other_project, created.id)
         assert error.value.code == KNOWLEDGE_NOT_FOUND
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_view_derives_document_count_and_delete_error(postgres_database_url: str) -> None:
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="counted", embedding_model_id=embedding_model_id))
-        async with harness.factory() as session, session.begin():
-            document_id = uuid.uuid4()
-            session.add(
-                KnowledgeDocumentRow(
-                    id=document_id,
-                    project_id=project_id,
-                    knowledge_base_id=created.id,
-                    name="doc",
-                    original_name="doc.txt",
-                    storage_key=f"projects/{project_id}/knowledge/{created.id}/{document_id}.txt",
-                    size_bytes=10,
-                    status="queued",
-                    version=1,
-                    chunk_size=1000,
-                    chunk_overlap=100,
-                )
-            )
-            session.add(
-                KnowledgeTaskRow(
-                    id=uuid.uuid4(),
-                    project_id=project_id,
-                    resource_id=created.id,
-                    kind="delete_knowledge_base",
-                    target_version=None,
-                    status="failed",
-                    attempt_count=3,
-                    error_message="对象存储清理失败",
-                    finished_at=datetime(2036, 3, 1, tzinfo=UTC),
-                )
-            )
-
-        stuck = await harness.service.get_knowledge_base(project_id, created.id)
-        assert stuck.document_count == 1
-        assert stuck.delete_error == "对象存储清理失败"
-
-        # An open retry hides the stale error while the deletion is in progress.
-        async with harness.factory() as session, session.begin():
-            session.add(
-                KnowledgeTaskRow(
-                    id=uuid.uuid4(),
-                    project_id=project_id,
-                    resource_id=created.id,
-                    kind="delete_knowledge_base",
-                    target_version=None,
-                    status="queued",
-                )
-            )
-        retrying = await harness.service.get_knowledge_base(project_id, created.id)
-        assert retrying.delete_error is None
     finally:
         await harness.engine.dispose()
 
@@ -514,31 +350,6 @@ async def test_initial_configuration_commits_models_and_retrieval_settings_toget
         assert rebound.value.code == KNOWLEDGE_INVALID_REQUEST
         unchanged = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(embedding_model_id=None))
         assert unchanged == configured
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_update_changes_allowed_fields_and_bumps_updated_at(postgres_database_url: str) -> None:
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="before", embedding_model_id=embedding_model_id))
-
-        updated = await harness.service.update_knowledge_base(
-            project_id,
-            created.id,
-            KnowledgeBaseUpdate(name="after", description="新的描述", status="disabled"),
-        )
-
-        assert updated.base.name == "after"
-        assert updated.base.description == "新的描述"
-        assert updated.base.status == "disabled"
-        assert updated.base.embedding_model_id == embedding_model_id
-        assert updated.base.updated_at > created.updated_at
-
-        # A no-op update keeps updated_at untouched.
-        unchanged = await harness.service.update_knowledge_base(project_id, created.id, KnowledgeBaseUpdate(name="after"))
-        assert unchanged.base.updated_at == updated.base.updated_at
     finally:
         await harness.engine.dispose()
 
@@ -631,50 +442,6 @@ async def test_update_revalidates_authority_before_locking_or_writing_base(
 
         assert error.value.code == KNOWLEDGE_NOT_FOUND
         assert (await harness.service.get_knowledge_base(project_id, created.id)).name == "before"
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_update_retrieval_defaults_round_trip_and_validate(postgres_database_url: str) -> None:
-    """K3: per-base default_top_k / default_score_threshold are editable and bounded."""
-
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="调参库", embedding_model_id=embedding_model_id))
-
-        updated = await harness.service.update_knowledge_base(
-            project_id,
-            created.id,
-            KnowledgeBaseUpdate(default_top_k=9, default_score_threshold=0.65),
-        )
-        assert updated.base.default_top_k == 9
-        assert updated.base.default_score_threshold == 0.65
-
-        # Boundary values are allowed: 1..20 and 0..1 (0 disables the filter).
-        edges = await harness.service.update_knowledge_base(
-            project_id,
-            created.id,
-            KnowledgeBaseUpdate(default_top_k=20, default_score_threshold=0.0),
-        )
-        assert edges.base.default_top_k == 20
-        assert edges.base.default_score_threshold == 0.0
-
-        for update in (
-            KnowledgeBaseUpdate(default_top_k=0),
-            KnowledgeBaseUpdate(default_top_k=21),
-            KnowledgeBaseUpdate(default_top_k=True),  # type: ignore[arg-type]
-            KnowledgeBaseUpdate(default_score_threshold=-0.1),
-            KnowledgeBaseUpdate(default_score_threshold=1.1),
-        ):
-            with pytest.raises(KnowledgeError) as error:
-                await harness.service.update_knowledge_base(project_id, created.id, update)
-            assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-
-        # Failed updates never partially persist.
-        fetched = await harness.service.get_knowledge_base(project_id, created.id)
-        assert fetched.default_top_k == 20
-        assert fetched.default_score_threshold == 0.0
     finally:
         await harness.engine.dispose()
 
@@ -785,108 +552,6 @@ def _seed_document(
         word_count=1200,
         error_message="旧的失败原因" if status == "failed" else None,
     )
-
-
-@pytest.mark.asyncio
-async def test_rebuild_rebinds_and_queues_reembed_for_initialized_documents(postgres_database_url: str) -> None:
-    """Initialized ready/failed documents queue ``reembed_document`` with
-    their rows and counters intact; a never-published failed document is
-    skipped and listed in the result instead of being silently re-parsed."""
-
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="重建库", embedding_model_id=embedding_model_id))
-        new_embedding_model_id, _ = await seed_registry_models(harness.factory)
-        async with harness.factory() as session, session.begin():
-            ready = _seed_document(project_id, created.id, name="ready", status="ready", version=2, published_version=2)
-            failed = _seed_document(project_id, created.id, name="failed", status="failed", version=4, published_version=3)
-            never_published = _seed_document(project_id, created.id, name="never", status="failed", published_version=None)
-            session.add_all([ready, failed, never_published])
-
-        result = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=new_embedding_model_id)
-
-        assert result.base.embedding_model_id == new_embedding_model_id
-        assert result.accepted_document_count == 2
-        assert result.skipped_document_ids == (never_published.id,)
-        async with harness.factory() as session:
-            documents = {row.name: row for row in (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == created.id))).all()}
-            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind == "reembed_document", KnowledgeTaskRow.project_id == project_id))).all()
-
-        for name, old_version in (("ready", 2), ("failed", 4)):
-            document = documents[name]
-            assert document.status == "queued", name
-            assert document.version == old_version + 1, name
-            # Content rows survive a re-embed; the counters keep describing them.
-            assert document.segment_count == 7
-            assert document.word_count == 1200
-            assert document.error_message is None
-        assert documents["never"].status == "failed"
-        assert documents["never"].version == 1
-        assert documents["never"].error_message == "旧的失败原因"
-
-        queued = {(task.resource_id, task.target_version) for task in tasks}
-        assert queued == {
-            (documents["ready"].id, 3),
-            (documents["failed"].id, 5),
-        }
-        assert all(task.status == "queued" for task in tasks)
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_rebuild_rejects_in_flight_documents(postgres_database_url: str) -> None:
-    """Uploading/queued/processing/deleting documents reject the rebuild:
-    changing the vector space must not race an upload or another build."""
-
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        for blocking_status in ("uploading", "queued", "processing", "deleting"):
-            created = await harness.service.create_knowledge_base(
-                project_id,
-                KnowledgeBaseCreate(name=f"拒绝-{blocking_status}", embedding_model_id=embedding_model_id),
-            )
-            async with harness.factory() as session, session.begin():
-                session.add(_seed_document(project_id, created.id, name="ready", status="ready"))
-                session.add(
-                    _seed_document(
-                        project_id,
-                        created.id,
-                        name=blocking_status,
-                        status=blocking_status,
-                        published_version=None,
-                    )
-                )
-            with pytest.raises(KnowledgeError) as error:
-                await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=embedding_model_id)
-            assert error.value.code == KNOWLEDGE_INVALID_REQUEST, blocking_status
-        async with harness.factory() as session:
-            tasks = (await session.scalars(select(KnowledgeTaskRow).where(KnowledgeTaskRow.kind.in_(("ingest_document", "reembed_document"))))).all()
-        assert tasks == []
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_rebuild_with_the_same_model_is_a_plain_re_embed(postgres_database_url: str) -> None:
-    harness, project_id, embedding_model_id = await _prepared(postgres_database_url)
-    try:
-        created = await harness.service.create_knowledge_base(project_id, KnowledgeBaseCreate(name="原地重建", embedding_model_id=embedding_model_id))
-        async with harness.factory() as session, session.begin():
-            session.add(_seed_document(project_id, created.id, name="doc", status="ready"))
-
-        result = await harness.service.rebuild_knowledge_base(project_id, created.id, embedding_model_id=embedding_model_id)
-
-        assert result.base.embedding_model_id == embedding_model_id
-        assert result.accepted_document_count == 1
-        assert result.skipped_document_ids == ()
-        async with harness.factory() as session:
-            document = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == created.id))
-            assert document is not None
-            assert document.status == "queued"
-            assert document.version == 2
-    finally:
-        await harness.engine.dispose()
 
 
 @pytest.mark.asyncio

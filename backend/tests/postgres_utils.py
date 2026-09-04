@@ -55,17 +55,20 @@ def _raise_or_note_cleanup_failure(
 
 
 @asynccontextmanager
-async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
-    """Create a generated test database and always terminate/drop it."""
+async def temporary_postgres_database(admin_url: str, *, template: str | None = None) -> AsyncIterator[str]:
+    """Create an isolated empty database or clone a prepared test template."""
     database = f"deerflow_test_{os.getpid()}_{uuid.uuid4().hex}"
     _validate_test_database_name(database)
+    if template is not None:
+        _validate_test_database_name(template)
 
     admin_engine = create_async_engine(replace_database(admin_url, "postgres"), isolation_level="AUTOCOMMIT")
     primary_error: BaseException | None = None
     try:
         try:
             async with admin_engine.connect() as connection:
-                await connection.execute(text(f"CREATE DATABASE \"{database}\" TEMPLATE template0 ENCODING 'UTF8'"))
+                source = f'"{template}"' if template is not None else "template0"
+                await connection.execute(text(f"CREATE DATABASE \"{database}\" TEMPLATE {source} ENCODING 'UTF8'"))
         except Exception:
             raise RuntimeError("unable to create isolated PostgreSQL test database") from None
 
@@ -74,18 +77,19 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
             try:
                 # Mirror the operator install flow: maintenance authority
                 # prepares ``public.vector`` before Schema V1 can be staged.
-                try:
-                    extension_engine = create_async_engine(
-                        replace_database(admin_url, database),
-                        isolation_level="AUTOCOMMIT",
-                    )
+                if template is None:
                     try:
-                        async with extension_engine.connect() as connection:
-                            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public"))
-                    finally:
-                        await extension_engine.dispose()
-                except Exception:
-                    raise RuntimeError("unable to prepare pgvector in isolated PostgreSQL test database") from None
+                        extension_engine = create_async_engine(
+                            replace_database(admin_url, database),
+                            isolation_level="AUTOCOMMIT",
+                        )
+                        try:
+                            async with extension_engine.connect() as connection:
+                                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public"))
+                        finally:
+                            await extension_engine.dispose()
+                    except Exception:
+                        raise RuntimeError("unable to prepare pgvector in isolated PostgreSQL test database") from None
                 yield replace_database(admin_url, database)
             except BaseException as exc:
                 body_error = exc

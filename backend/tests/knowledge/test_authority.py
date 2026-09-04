@@ -36,7 +36,6 @@ from app.knowledge.composition import (
 )
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
-from deerflow.persistence.bootstrap import _install_full_schema
 
 
 @pytest.mark.asyncio
@@ -53,7 +52,6 @@ async def test_project_authority_rejects_membership_revoked_after_request_admiss
 
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
@@ -157,7 +155,6 @@ async def test_chunk_preview_revalidates_membership_after_parser_work(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     module: KnowledgeModule | None = None
-    await _install_full_schema(engine)
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
@@ -295,7 +292,6 @@ async def test_reparse_preview_revalidates_after_download_and_cleans_temp(
 
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
@@ -447,7 +443,6 @@ async def test_segment_content_api_revalidates_membership_inside_the_read_transa
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     module: KnowledgeModule | None = None
-    await _install_full_schema(engine)
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
@@ -617,7 +612,6 @@ async def test_batch_metadata_patch_revalidates_membership_and_rolls_back(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     module: KnowledgeModule | None = None
-    await _install_full_schema(engine)
     user_id = uuid.uuid4()
     project_id = uuid.uuid4()
     membership_id = uuid.uuid4()
@@ -764,7 +758,6 @@ async def test_project_health_final_guard_database_failure_uses_public_error(
 
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     project_id = uuid.uuid4()
 
     class _Authority:

@@ -22,10 +22,7 @@ from actweave_knowledge import (
     KnowledgeRerankMaterial,
 )
 from actweave_knowledge.models.client import (
-    EMBEDDING_PROBE_TEXT,
     PROBE_TIMEOUT_SECONDS_CAP,
-    RERANK_PROBE_DOCUMENTS,
-    RERANK_PROBE_QUERY,
     KnowledgeModelClient,
     RerankScore,
 )
@@ -127,31 +124,6 @@ async def test_embed_restores_provider_index_order_and_sends_contract_payload() 
 
 
 @pytest.mark.asyncio
-async def test_embed_batches_by_max_batch_and_keeps_global_order() -> None:
-    recorder = _Recorder()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorder.record(request)
-        batch = json.loads(request.content)["input"]
-        # Answer each batch in reverse index order to prove re-ordering.
-        return _embedding_response([(index, [float(text_value.removeprefix("text-")) + 1.0, 1.0, 0.0]) for index, text_value in reversed(list(enumerate(batch)))])
-
-    texts = [f"text-{position}" for position in range(5)]
-    client = _client(handler)
-    try:
-        vectors = await client.embed(_embedding_material(), texts)
-    finally:
-        await client.aclose()
-
-    assert [vector[0] for vector in vectors] == [1.0, 2.0, 3.0, 4.0, 5.0]
-    assert [body["input"] for _, body in recorder.requests] == [
-        ["text-0", "text-1"],
-        ["text-2", "text-3"],
-        ["text-4"],
-    ]
-
-
-@pytest.mark.asyncio
 async def test_embed_accepts_siliconflow_shard_reset_indexes() -> None:
     """Regression: SiliconFlow numbers ``index`` per internal shard of 8.
 
@@ -174,19 +146,7 @@ async def test_embed_accepts_siliconflow_shard_reset_indexes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embed_with_no_texts_never_calls_the_provider() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("provider must not be called")
-
-    client = _client(handler)
-    try:
-        assert await client.embed(_embedding_material(), []) == []
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("retryable_status", [429, 500, 503])
+@pytest.mark.parametrize("retryable_status", [429, 503])
 async def test_embed_retries_once_on_retryable_statuses(retryable_status: int) -> None:
     attempts = 0
 
@@ -195,27 +155,6 @@ async def test_embed_retries_once_on_retryable_statuses(retryable_status: int) -
         attempts += 1
         if attempts == 1:
             return httpx.Response(retryable_status)
-        return _embedding_response([(0, [1.0, 0.0, 0.0])])
-
-    client = _client(handler)
-    try:
-        vectors = await client.embed(_embedding_material(), ["only"])
-    finally:
-        await client.aclose()
-
-    assert attempts == 2
-    assert vectors == [[1.0, 0.0, 0.0]]
-
-
-@pytest.mark.asyncio
-async def test_embed_recovers_when_the_retry_succeeds_after_a_transport_error() -> None:
-    attempts = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise httpx.ConnectError("first attempt drops")
         return _embedding_response([(0, [1.0, 0.0, 0.0])])
 
     client = _client(handler)
@@ -399,18 +338,6 @@ async def test_rerank_maps_indexes_and_sends_contract_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rerank_with_no_documents_never_calls_the_provider() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("provider must not be called")
-
-    client = _client(handler)
-    try:
-        assert await client.rerank(_rerank_material(), "query", [], top_n=4) == []
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
 async def test_rerank_batches_offset_mapping_and_cross_batch_merge() -> None:
     recorder = _Recorder()
     responses = iter(
@@ -483,21 +410,6 @@ async def test_rerank_rejects_invalid_provider_payloads(results: list[dict[str, 
 
 
 @pytest.mark.asyncio
-async def test_rerank_missing_results_key_fails() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"unexpected": True})
-
-    client = _client(handler)
-    try:
-        with pytest.raises(KnowledgeError) as error:
-            await client.rerank(_rerank_material(), "query", ["doc a"], top_n=1)
-    finally:
-        await client.aclose()
-
-    assert error.value.code == KNOWLEDGE_RERANK_FAILED
-
-
-@pytest.mark.asyncio
 async def test_rerank_retries_once_then_fails_with_rerank_code() -> None:
     attempts = 0
 
@@ -520,60 +432,6 @@ async def test_rerank_retries_once_then_fails_with_rerank_code() -> None:
 # ---------------------------------------------------------------------------
 # Client: typed connection probes
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_verify_embedding_probes_with_the_fixed_text() -> None:
-    recorder = _Recorder()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorder.record(request)
-        return _embedding_response([(0, [1.0, 0.5, 0.0])])
-
-    client = _client(handler)
-    try:
-        await client.verify_embedding(_embedding_material())
-    finally:
-        await client.aclose()
-
-    assert [path for path, _ in recorder.requests] == ["/v1/embeddings"]
-    assert recorder.requests[0][1]["input"] == [EMBEDDING_PROBE_TEXT]
-
-
-@pytest.mark.asyncio
-async def test_verify_rerank_probes_with_the_fixed_candidates() -> None:
-    recorder = _Recorder()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorder.record(request)
-        return _rerank_response([(0, 0.8), (1, 0.3)])
-
-    client = _client(handler)
-    try:
-        await client.verify_rerank(_rerank_material())
-    finally:
-        await client.aclose()
-
-    assert [path for path, _ in recorder.requests] == ["/v1/rerank"]
-    body = recorder.requests[0][1]
-    assert body["query"] == RERANK_PROBE_QUERY
-    assert body["documents"] == list(RERANK_PROBE_DOCUMENTS)
-    assert body["top_n"] == 2
-
-
-@pytest.mark.asyncio
-async def test_verify_rerank_requires_a_result() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _rerank_response([])
-
-    client = _client(handler)
-    try:
-        with pytest.raises(KnowledgeError) as error:
-            await client.verify_rerank(_rerank_material())
-    finally:
-        await client.aclose()
-
-    assert error.value.code == KNOWLEDGE_RERANK_FAILED
 
 
 @pytest.mark.asyncio

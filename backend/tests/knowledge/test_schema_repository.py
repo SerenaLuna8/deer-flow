@@ -1,8 +1,7 @@
 """M1 gates: knowledge tables in Schema V1, ORM parity, queue and bootstrap.
 
-Every test installs the real composed Schema V1 snapshot into an isolated
-``deerflow_test_*`` database, so the constraints exercised here are the ones
-operators actually get from ``make setup-db``.
+Constraint tests clone the real composed Schema V1 session template. Only
+bootstrap tests request an empty database and run installation themselves.
 """
 
 from __future__ import annotations
@@ -260,7 +259,6 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
 
     engine = create_async_engine(postgres_database_url)
     try:
-        await _install_full_schema(engine)
         # The registry and settings rows live on the host harness metadata,
         # not the package-isolated KnowledgeOrmBase.
         host_metadata = ModelProviderRow.metadata
@@ -288,7 +286,7 @@ async def test_orm_metadata_matches_installed_catalog(postgres_database_url: str
 
 @pytest.mark.asyncio
 async def test_default_registry_bootstrap_roundtrip_and_conflict(
-    postgres_database_url: str,
+    empty_postgres_database_url: str,
     model_registry_bootstrap_environment: None,
 ) -> None:
     """Task 9：预检加密材料 → 安装唯一默认 Provider 与模型 → 重复安装不再写入。"""
@@ -303,7 +301,7 @@ async def test_default_registry_bootstrap_roundtrip_and_conflict(
     assert b"unit-registry-plaintext-key" not in seed.api_key_ciphertext
     assert "unit-registry-plaintext-key" not in repr(seed)
 
-    engine = create_async_engine(postgres_database_url)
+    engine = create_async_engine(empty_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _install_full_schema(engine)
@@ -402,41 +400,12 @@ def test_prepare_model_registry_bootstrap_honors_explicit_skip(
 
 
 @pytest.mark.asyncio
-async def test_empty_base_can_be_stored_before_embedding_configuration(
-    postgres_database_url: str,
-) -> None:
-    """空知识库可以先保存，检索模式默认值和后续模型绑定仍由原有契约管理。"""
-
-    engine = create_async_engine(postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        await _install_full_schema(engine)
-        async with factory() as session, session.begin():
-            project_id = await _seed_project(session, "unconfigured")
-            base = KnowledgeBaseRow(
-                id=uuid.uuid4(),
-                project_id=project_id,
-                name="Unconfigured knowledge",
-            )
-            session.add(base)
-            await session.flush()
-            await session.refresh(base)
-
-            assert base.embedding_model_id is None
-            assert base.reranker_model_id is None
-            assert base.retrieval_mode == "semantic"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_base_names_unique_per_project_and_model_restrict(
     postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "uniq")
@@ -476,7 +445,6 @@ async def test_project_delete_restricted_until_knowledge_rows_removed(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "purge")
@@ -505,7 +473,6 @@ async def test_document_status_error_and_storage_key_rules(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "docs")
@@ -554,7 +521,6 @@ async def test_segment_vector_roundtrip_and_cascade_delete(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "vec")
@@ -599,7 +565,6 @@ async def test_segment_summary_unique_per_segment_and_cascades_with_segment(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         embedding_model_id, _ = await seed_registry_models(factory)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "summary")
@@ -661,7 +626,6 @@ async def test_knowledge_system_settings_singleton_and_minio_guards(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             session.add(KnowledgeSystemSettingsRow(id=1))
             await session.flush()
@@ -750,7 +714,6 @@ async def test_summarize_task_shares_the_open_indexing_slot(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "summarize")
             resource_id = uuid.uuid4()
@@ -819,7 +782,6 @@ async def test_open_task_partial_uniques_and_kind_rules(
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "tasks")
             resource_id = uuid.uuid4()
@@ -941,7 +903,6 @@ async def test_claim_next_task_orders_and_skips_locked_rows(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     base_time = datetime(2036, 1, 2, 3, 0, tzinfo=UTC)
     try:
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "claim")
             first = _task(
@@ -995,7 +956,6 @@ async def test_claim_reclaims_expired_lease_only_while_attempts_remain(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     moment = datetime(2036, 2, 3, 4, 0, tzinfo=UTC)
     try:
-        await _install_full_schema(engine)
         async with factory() as session, session.begin():
             project_id = await _seed_project(session, "lease")
             expired = _task(
@@ -1057,7 +1017,7 @@ async def test_claim_reclaims_expired_lease_only_while_attempts_remain(
 
 @pytest.mark.asyncio
 async def test_missing_registry_seed_fails_bootstrap_without_marker(
-    postgres_database_url: str,
+    empty_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Task 9：模型注册表预检材料缺失时 Schema V1 marker 不发布。"""
@@ -1072,12 +1032,12 @@ async def test_missing_registry_seed_fails_bootstrap_without_marker(
 
     with pytest.raises(setup_postgres.PostgresSetupError, match="MODEL_REGISTRY_BOOTSTRAP_SEED_MISSING"):
         await setup_postgres._bootstrap_empty_schema_under_lock(
-            postgres_database_url,
+            empty_postgres_database_url,
             default_model_bootstrap=default_model_bootstrap,
             model_registry_bootstrap=None,
         )
 
-    engine = create_async_engine(postgres_database_url)
+    engine = create_async_engine(empty_postgres_database_url)
     try:
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
@@ -1094,7 +1054,7 @@ async def test_missing_registry_seed_fails_bootstrap_without_marker(
 
 @pytest.mark.asyncio
 async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
-    postgres_database_url: str,
+    empty_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The explicit skip omits only the SiliconFlow seed; DeepSeek still lands."""
@@ -1109,13 +1069,13 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
     from scripts import setup_postgres
 
     revision = await setup_postgres._bootstrap_empty_schema_under_lock(
-        postgres_database_url,
+        empty_postgres_database_url,
         default_model_bootstrap=prepare_default_system_model_bootstrap(),
         model_registry_bootstrap=ModelRegistryBootstrapSkipped(),
     )
     assert revision == setup_postgres.CURRENT_SCHEMA_REVISION
 
-    engine = create_async_engine(postgres_database_url)
+    engine = create_async_engine(empty_postgres_database_url)
     try:
         async with engine.connect() as connection:
             marker_count = await connection.scalar(text("SELECT count(*) FROM alembic_version"))
@@ -1132,7 +1092,7 @@ async def test_bootstrap_with_explicit_skip_installs_schema_without_seed(
 
 @pytest.mark.asyncio
 async def test_default_full_install_seeds_both_providers_with_their_own_keys(
-    postgres_database_url: str,
+    empty_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """联合验收：默认全新安装得到 2 供应商 / 3 文本模型 / 2 检索模型 / 3 代际。
@@ -1163,14 +1123,14 @@ async def test_default_full_install_seeds_both_providers_with_their_own_keys(
     from scripts import setup_postgres
 
     revision = await setup_postgres._bootstrap_empty_schema_under_lock(
-        postgres_database_url,
+        empty_postgres_database_url,
         default_model_bootstrap=prepare_default_system_model_bootstrap(),
         model_registry_bootstrap=prepare_model_registry_bootstrap(),
     )
     assert revision == setup_postgres.CURRENT_SCHEMA_REVISION
 
     secret_key = SecretKey(b64decode(_SECRET_KEY))
-    engine = create_async_engine(postgres_database_url)
+    engine = create_async_engine(empty_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with engine.connect() as connection:

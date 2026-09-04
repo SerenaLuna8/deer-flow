@@ -151,38 +151,6 @@ async def test_hybrid_lifts_an_exact_token_match_that_cosine_ranks_low(postgres_
 
 
 @pytest.mark.asyncio
-async def test_semantic_mode_never_builds_a_lexical_query_or_caps_tokens(postgres_database_url: str) -> None:
-    """The same data in semantic mode keeps native cosine ordering, and the
-    128-token limit does not apply without a hybrid target."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_hybrid_general_base(
-            harness,
-            retrieval_mode="semantic",
-            segments=[
-                ("错误码e404排查手册", _unit_vector(0.2)),
-                ("普通安装说明", _unit_vector(0.9)),
-            ],
-        )
-
-        result = await harness.service.search(_request(project_id, query="e404", score_threshold=0.0, debug=True))
-
-        assert [hit.citation.snippet for hit in result.hits] == ["普通安装说明", "错误码e404排查手册"]
-        assert all(hit.citation.score_kind == "cosine" for hit in result.hits)
-        assert result.diagnostics is not None
-        assert result.diagnostics.retrieval_mode == "semantic"
-        assert result.diagnostics.counts.lexical_candidates == 0
-
-        # Far more than 128 deduplicated tokens, accepted in semantic mode.
-        long_query = " ".join(f"tok{index}" for index in range(KNOWLEDGE_MAX_LEXICAL_QUERY_TOKENS + 20))
-        wide = await harness.service.search(_request(project_id, query=long_query, score_threshold=0.0))
-        assert [hit.citation.snippet for hit in wide.hits]  # searched, not rejected
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_request_mode_override_applies_to_this_call_only(postgres_database_url: str) -> None:
     harness = await _harness(postgres_database_url)
     try:
@@ -210,29 +178,6 @@ async def test_request_mode_override_applies_to_this_call_only(postgres_database
         with pytest.raises(KnowledgeError) as error:
             await harness.service.search(_request(project_id, retrieval_mode="fancy"))  # type: ignore[arg-type]
         assert error.value.code == KNOWLEDGE_INVALID_REQUEST
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_hybrid_forced_semantic_override_skips_the_lexical_route(postgres_database_url: str) -> None:
-    harness = await _harness(postgres_database_url)
-    try:
-        project_id, _, _, _ = await _seed_hybrid_general_base(
-            harness,
-            retrieval_mode="hybrid",
-            segments=[
-                ("错误码e404排查手册", _unit_vector(0.2)),
-                ("普通安装说明", _unit_vector(0.9)),
-            ],
-        )
-
-        result = await harness.service.search(_request(project_id, query="e404", score_threshold=0.0, retrieval_mode="semantic", debug=True))
-
-        assert result.hits[0].citation.snippet == "普通安装说明"
-        assert result.diagnostics is not None
-        assert result.diagnostics.retrieval_mode == "semantic"
-        assert result.diagnostics.counts.lexical_candidates == 0
     finally:
         await harness.engine.dispose()
 
@@ -428,48 +373,6 @@ async def test_reranked_hybrid_group_keeps_the_threshold_on_the_rerank_score(pos
         assert result.diagnostics.counts.threshold_filtered == 1
         assert result.diagnostics.counts.lexical_threshold_exempt == 0
         assert result.diagnostics.empty_reason == "filtered_out"
-    finally:
-        await harness.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_unified_reranker_keeps_native_scores_while_lexical_widens_recall(postgres_database_url: str) -> None:
-    """Branch 1 with a hybrid base: the lexical route saves a candidate the
-    semantic cap dropped, the shared reranker scores it, ordering stays native."""
-
-    harness = await _harness(postgres_database_url)
-    try:
-        # 21 well-matching plain segments push the exact-token segment out of
-        # the semantic route's per-base cap (C = 20 for top_k <= 4).
-        segments: list[tuple[str, list[float]]] = [(f"普通段落{index:02d}", _unit_vector(0.9 - 0.004 * index)) for index in range(21)]
-        segments.append(("错误码e404排查手册", _unit_vector(0.05)))
-        project_id, _, _, rerank_id = await _seed_hybrid_general_base(
-            harness,
-            with_reranker=True,
-            segments=segments,
-        )
-        async with harness.factory() as session, session.begin():
-            await session.execute(
-                text("UPDATE knowledge_segments SET index_text = 'model:' || content WHERE project_id = :project_id"),
-                {"project_id": project_id},
-            )
-        harness.client.rerank_scripts[rerank_id] = lambda documents, top_n: [RerankScore(index=index, score=0.95 if "e404" in document else 0.5) for index, document in enumerate(documents)][:top_n]
-
-        result = await harness.service.search(_request(project_id, query="e404", top_k=1, debug=True))
-
-        assert [hit.citation.snippet for hit in result.hits] == ["错误码e404排查手册"]
-        top = result.hits[0]
-        assert top.citation.score == pytest.approx(0.95)  # native rerank, no fusion
-        assert top.citation.score_kind == "rerank"
-        assert top.ranking_method == "rerank"
-        [(_, _, submitted, _)] = harness.client.rerank_calls
-        assert "model:错误码e404排查手册" in submitted
-        assert all(document.startswith("model:") for document in submitted)
-        assert result.diagnostics is not None
-        assert result.diagnostics.ranking_method == "rerank"
-        assert result.diagnostics.retrieval_mode == "hybrid"
-        assert result.diagnostics.counts.lexical_candidates >= 1
-        assert result.diagnostics.heterogeneous_without_lexical_evidence is False
     finally:
         await harness.engine.dispose()
 

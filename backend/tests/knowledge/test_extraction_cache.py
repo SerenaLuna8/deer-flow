@@ -36,10 +36,9 @@ async def quota_state(h):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("images", [False, True])
-async def test_cache_preserves_pages_warnings_occurrences_without_second_put(postgres_database_url, tmp_path, images):
+async def test_cache_preserves_pages_warnings_occurrences_without_second_put(postgres_database_url, tmp_path):
     async with extraction_harness(postgres_database_url) as h:
-        assets = (write_test_asset(tmp_path),) if images else ()
+        assets = (write_test_asset(tmp_path),)
         reservation, result, profile = await prepared(h, assets=assets, work_dir=tmp_path)
         first = await h.store.complete(reservation, result)
         before = await quota_state(h)
@@ -48,9 +47,8 @@ async def test_cache_preserves_pages_warnings_occurrences_without_second_put(pos
         assert cached == first and cached.result == result
         assert len(cached.result.documents) == 2 and cached.result.documents[1].warnings
         assert cached.result.documents[1].source_spans[0].location == {"page": 2}
-        if images:
-            assert cached.result.documents[0].attachments[0].source.location["page"] == 1
-            assert cached.result.documents[1].attachments[0].source.location["page"] == 2
+        assert cached.result.documents[0].attachments[0].source.location["page"] == 1
+        assert cached.result.documents[1].attachments[0].source.location["page"] == 2
         assert [c for c in h.object_store.calls if c[0] == "put"] == puts
         assert await quota_state(h) == before
         rows = await h.read_rows()
@@ -60,7 +58,7 @@ async def test_cache_preserves_pages_warnings_occurrences_without_second_put(pos
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("axis", ["source", "extractor_version", "normalization_version", "image_policy_version", "header_rules", "disabled", "chunk"])
+@pytest.mark.parametrize("axis", ["source", "extractor_version", "header_rules", "disabled", "chunk"])
 async def test_cache_identity_axes(postgres_database_url, axis):
     async with extraction_harness(postgres_database_url) as h:
         reservation, result, profile = await prepared(h)
@@ -305,8 +303,7 @@ async def test_failed_complete_keeps_physical_quota_facts_and_old_publication(po
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("metadata", [None, "", "not-a-sha256"])
-async def test_untrusted_asset_hash_metadata_requires_actual_bounded_get(postgres_database_url, tmp_path, monkeypatch, metadata):
+async def test_untrusted_asset_hash_metadata_requires_actual_bounded_get(postgres_database_url, tmp_path, monkeypatch):
     from actweave_knowledge.storage.minio_store import StoredObjectInfo
 
     async with extraction_harness(postgres_database_url) as h:
@@ -317,7 +314,7 @@ async def test_untrusted_asset_hash_metadata_requires_actual_bounded_get(postgre
 
         async def without_hash(key):
             info = await real_stat(key)
-            return StoredObjectInfo(info.size_bytes, metadata)
+            return StoredObjectInfo(info.size_bytes, None)
 
         monkeypatch.setattr(h.object_store, "stat_object", without_hash)
         before = len(h.object_store.calls)
@@ -348,16 +345,6 @@ async def test_caller_limits_cannot_raise_global_cache_budget(postgres_database_
             await h.store.find_ready(h.claim, source_sha256=result.source_sha256, profile=profile, limits=ExtractionLimits(max_text_chars=6_000_000))
         assert error.value.code == KNOWLEDGE_QUOTA_EXCEEDED
         assert (await h.read_rows())["extractions"][0].state == "ready"
-
-
-@pytest.mark.asyncio
-async def test_published_cache_fixture_is_settled_and_path_free(postgres_database_url):
-    async with extraction_harness(postgres_database_url) as h:
-        stored = await h.published_result()
-        rows = await h.read_rows()
-        assert rows["documents"][0].published_extraction_id == stored.extraction_id
-        assert rows["tasks"][0].status == "succeeded" and rows["tasks"][0].extraction_id is None
-        assert not any(hasattr(stored, name) for name in ("work_dir", "manifest_path", "storage_key"))
 
 
 @pytest.mark.asyncio

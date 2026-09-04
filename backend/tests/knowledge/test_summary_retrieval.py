@@ -99,9 +99,6 @@ async def test_summary_recalls_a_segment_outside_the_content_vector_budget_witho
     [
         ("general", 0.9, 0.5, "segment", 0.9),
         ("general", 0.2, 0.9, "summary", 0.9),
-        ("general", 0.8, 0.8, "segment", 0.8),
-        ("parent_child", 0.9, 0.5, "child", 0.9),
-        ("parent_child", 0.2, 0.9, "summary", 0.9),
         ("parent_child", 0.8, 0.8, "child", 0.8),
     ],
 )

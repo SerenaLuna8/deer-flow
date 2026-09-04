@@ -56,7 +56,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.knowledge.composition import is_knowledge_project_active
-from deerflow.persistence.bootstrap import _install_full_schema
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -127,7 +126,6 @@ class _Harness:
 async def _harness(postgres_database_url: str) -> _Harness:
     engine = create_async_engine(postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    await _install_full_schema(engine)
     return _Harness(engine, factory, _FakeModelClient())
 
 
