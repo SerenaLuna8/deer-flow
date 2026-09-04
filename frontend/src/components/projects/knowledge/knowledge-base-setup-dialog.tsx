@@ -119,7 +119,7 @@ export function KnowledgeBaseSetupDialog({
               >
                 <SelectTrigger
                   aria-label={labels.bases.modelLabel}
-                  className="bg-muted/60 w-full border-transparent text-[13px] shadow-none"
+                  className="bg-background border-input/80 w-full text-[13px] shadow-none"
                 >
                   <SelectValue placeholder={labels.bases.modelPlaceholder} />
                 </SelectTrigger>
@@ -153,7 +153,7 @@ export function KnowledgeBaseSetupDialog({
                 >
                   <SelectTrigger
                     aria-label={labels.bases.rerankerLabel}
-                    className="bg-muted/60 w-full border-transparent text-[13px] shadow-none"
+                    className="bg-background border-input/80 w-full text-[13px] shadow-none"
                   >
                     <SelectValue />
                   </SelectTrigger>

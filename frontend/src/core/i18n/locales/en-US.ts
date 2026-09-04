@@ -233,7 +233,7 @@ export const enUS: Translations = {
       openDocuments: "View documents",
       noDescription: "No description yet.",
       basicSectionTitle: "General",
-      retrievalSectionTitle: "Retrieval defaults",
+      retrievalSectionTitle: "Retrieval settings",
       retrievalModeLabel: "Default retrieval route",
       retrievalModeHint:
         "Used by Agents and searches that use the base default. Takes effect on save; no rebuild required.",
@@ -244,9 +244,9 @@ export const enUS: Translations = {
         hybrid:
           "Combine semantic and keyword retrieval into one set of candidates.",
       },
-      defaultTopKLabel: "Default results (top_k)",
-      defaultTopKHint: "Used when a search omits top_k; range 1-20.",
-      defaultThresholdLabel: "Default score threshold",
+      defaultTopKLabel: "Top K",
+      defaultTopKHint: "Used when a search omits Top K; range 1-20.",
+      defaultThresholdLabel: "Score threshold",
       defaultThresholdHint:
         "Used when a search omits the threshold; 0 disables filtering.",
       rerankerLabel: "Reranker model",
@@ -256,8 +256,6 @@ export const enUS: Translations = {
         "No reranker models are available. Continue without reranking or configure one in model management.",
       rebuildSectionTitle: "Embedding model",
       rebuildModelLabel: "Embedding model",
-      rebuildHint:
-        "Regenerate vectors with the current or a new model. This does not read the original file or run parsing; segment text, IDs, enabled states, manual edits, attachment bindings, and image bytes remain unchanged. Documents stay out of retrieval until processing finishes.",
       rebuildButton: "Re-embed documents",
       rebuildPending: "Submitting…",
       rebuildOutcome: (accepted, skipped) =>
@@ -461,6 +459,7 @@ export const enUS: Translations = {
         size: "Size",
         segments: "Segments",
         words: "Characters",
+        uploadedAt: "Uploaded",
         actions: "Actions",
       },
       retry: "Retry",
@@ -531,21 +530,20 @@ export const enUS: Translations = {
       batchMetadataModeClear: "Clear",
       batchMetadataOverwrite: (count) =>
         `Overwrites this field on ${count} documents`,
-      reparse: "Reparse from original",
-      reparseTitle: (name) => `Reparse ${name}`,
+      chunkSettings: "Chunk settings",
+      chunkSettingsTitle: (name) => `Chunk settings · ${name}`,
+      chunkSettingsCurrentProfile:
+        "Pre-filled with the document’s current chunk settings. After editing, refresh the preview before confirming.",
       reparseWarning:
-        "Reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten. Published attachment bindings are replaced by the new parse. Re-embedding incurs model cost, and the document is not searchable while it processes.",
+        "Confirming reparses the stored original file with the parameters below and replaces every segment. Manual segment edits and per-segment disables are overwritten. Published attachment bindings are replaced by the new parse. Re-embedding incurs model cost, and the document is not searchable while it processes.",
       reparseLegacyUnitWarning:
         "This document uses historical character limits. Reparse uses Knowledge Tokens and may change chunk boundaries.",
-      reparsePreviewButton: "Preview split",
-      reparsePreviewShowing: (shown, total) =>
-        `Showing ${shown} of ${total} chunks`,
       reparsePreviewAttachmentsOmitted: (count) =>
         `${count} preview ${count === 1 ? "thumbnail was" : "thumbnails were"} omitted; published attachments are not lost.`,
       reparseSubmit: "Reparse",
       reparsePending: "Submitting…",
       reparseConflict:
-        "The document changed outside this dialog. The latest parameters and version were reloaded; review and confirm again.",
+        "The document changed outside this page. The latest version was reloaded; review the parameters and confirm again.",
       parsingNotices: (count) =>
         `${count} parsing ${count === 1 ? "notice" : "notices"}`,
       imageFailures: (count) =>
@@ -628,6 +626,7 @@ export const enUS: Translations = {
       title: "Retrieval test",
       workspaceHint:
         "Ask a question to check what this knowledge base retrieves.",
+      submitHint: "Enter to search, Shift + Enter for a new line",
       parametersTitle: "Retrieval parameters",
       outcomeTitle: "Retrieval results",
       waitingTitle: "Ready to search",
@@ -638,7 +637,7 @@ export const enUS: Translations = {
       queryPlaceholder: "Enter a question or keywords",
       baseFilterLabel: "Limit to bases (optional)",
       allBases: "All bases",
-      topKLabel: "Results (top_k)",
+      topKLabel: "Top K",
       thresholdLabel: "Score threshold",
       submit: "Search",
       searching: "Searching…",

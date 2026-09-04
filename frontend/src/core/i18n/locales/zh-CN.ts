@@ -224,7 +224,7 @@ export const zhCN: Translations = {
       openDocuments: "查看文档",
       noDescription: "暂无描述。",
       basicSectionTitle: "基本信息",
-      retrievalSectionTitle: "检索默认参数",
+      retrievalSectionTitle: "检索设置",
       retrievalModeLabel: "默认检索路线",
       retrievalModeHint:
         "供 Agent 和使用库默认值的检索使用。保存后生效，无需重建。",
@@ -233,9 +233,9 @@ export const zhCN: Translations = {
         semantic: "将问题转为向量，查找语义相近的文档分段。",
         hybrid: "同时进行语义与关键词检索，合并候选结果。",
       },
-      defaultTopKLabel: "默认返回条数 (top_k)",
-      defaultTopKHint: "检索未指定 top_k 时使用，范围 1-20。",
-      defaultThresholdLabel: "默认分数阈值",
+      defaultTopKLabel: "Top K",
+      defaultTopKHint: "检索未指定 Top K 时使用，范围 1-20。",
+      defaultThresholdLabel: "Score 阈值",
       defaultThresholdHint: "检索未指定阈值时使用；0 表示不过滤。",
       rerankerLabel: "重排序模型",
       rerankerNone: "不使用重排序",
@@ -244,8 +244,6 @@ export const zhCN: Translations = {
         "暂无可用的重排序模型，可先不启用；模型需在模型管理中配置。",
       rebuildSectionTitle: "嵌入模型",
       rebuildModelLabel: "Embedding 模型",
-      rebuildHint:
-        "仅重新生成向量，不读取原文件、不重新解析；全部分段的文本、身份、启停状态、人工编辑、附件绑定和图片字节保持不变。文档完成前暂停检索，可沿用或更换模型。",
       rebuildButton: "重新嵌入文档",
       rebuildPending: "提交中…",
       rebuildOutcome: (accepted, skipped) =>
@@ -434,6 +432,7 @@ export const zhCN: Translations = {
         size: "大小",
         segments: "分段",
         words: "字符数",
+        uploadedAt: "上传时间",
         actions: "操作",
       },
       retry: "重试",
@@ -501,21 +500,20 @@ export const zhCN: Translations = {
       batchMetadataModeSet: "设置",
       batchMetadataModeClear: "清空",
       batchMetadataOverwrite: (count) => `将覆盖 ${count} 个文档的该字段`,
-      reparse: "重新解析原文件",
-      reparseTitle: (name) => `重新解析「${name}」`,
+      chunkSettings: "分段设置",
+      chunkSettingsTitle: (name) => `分段设置 · ${name}`,
+      chunkSettingsCurrentProfile:
+        "已填入该文档当前的分段参数；修改后请刷新右侧预览再确认。",
       reparseWarning:
-        "将按下方参数从原始文件重新解析并全量替换分段：人工增删改与段级禁用会被覆盖，已发布附件绑定由新解析结果替换；重新嵌入会产生模型调用费用，处理期间该文档暂不可检索。",
+        "确认后将按下方参数从原始文件重新解析并全量替换分段：人工增删改与段级禁用会被覆盖，已发布附件绑定由新解析结果替换；重新嵌入会产生模型调用费用，处理期间该文档暂不可检索。",
       reparseLegacyUnitWarning:
         "该文档使用历史字符单位；重新解析将改用“知识库 Token”，分段边界可能变化。",
-      reparsePreviewButton: "预览切分",
-      reparsePreviewShowing: (shown, total) =>
-        `预览 ${shown} 段 / 共 ${total} 段`,
       reparsePreviewAttachmentsOmitted: (count) =>
         `仅省略 ${count} 张预览缩略图，正式附件不会丢失。`,
       reparseSubmit: "确认重新解析",
       reparsePending: "提交中…",
       reparseConflict:
-        "文档在本对话框之外发生了变化，已刷新最新参数与版本，请核对后重新确认。",
+        "文档在本页面之外发生了变化，已刷新最新版本，请核对参数后重新确认。",
       parsingNotices: (count) => `${count} 条解析提示`,
       imageFailures: (count) => `${count} 张图片未能保存`,
       warningMessages: {
@@ -589,6 +587,7 @@ export const zhCN: Translations = {
     search: {
       title: "检索测试",
       workspaceHint: "输入问题，验证知识库的召回效果。",
+      submitHint: "Enter 检索，Shift + Enter 换行",
       parametersTitle: "检索参数",
       outcomeTitle: "检索结果",
       waitingTitle: "等待检索",
@@ -599,8 +598,8 @@ export const zhCN: Translations = {
       queryPlaceholder: "输入要检索的问题或关键词",
       baseFilterLabel: "限定知识库（可选）",
       allBases: "全部知识库",
-      topKLabel: "返回条数 (top_k)",
-      thresholdLabel: "分数阈值",
+      topKLabel: "Top K",
+      thresholdLabel: "Score 阈值",
       submit: "检索",
       searching: "检索中…",
       empty: "未找到相关内容",

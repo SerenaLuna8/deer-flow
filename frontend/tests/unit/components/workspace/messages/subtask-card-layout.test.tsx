@@ -15,6 +15,8 @@ const task: Subtask = {
   statusSource: "tool_result",
   subagent_type: "general-purpose",
   description: longDescription,
+  modelName: "00000000-0000-4000-8000-000000000401",
+  usage: { inputTokens: 80_000, outputTokens: 7_500, totalTokens: 87_500 },
   prompt: "Research the topic",
   result: "Done",
 };
@@ -25,7 +27,18 @@ rs.mock("@/core/tasks/context", () => ({
 }));
 rs.mock("@/core/models/hooks", () => ({
   useModels: () => ({
-    models: [],
+    models: [
+      {
+        name: task.modelName,
+        model: task.modelName,
+        display_name: "DeepSeek V4 Flash",
+        supports_thinking: true,
+        supports_reasoning_effort: true,
+        supports_vision: true,
+        supports_vision_bridge: false,
+        is_default: true,
+      },
+    ],
     tokenUsageEnabled: true,
   }),
 }));
@@ -38,7 +51,7 @@ rs.mock("@/core/private-work/provider", () => ({
 }));
 
 describe("SubtaskCard constrained header layout", () => {
-  test("keeps a long title and status inside the header without clipping the card effects", () => {
+  test("keeps the title and status while hiding model, token and context usage displays", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
         <SubtaskCard
@@ -64,7 +77,11 @@ describe("SubtaskCard constrained header layout", () => {
     expect(titleClass.split(" ")).toEqual(
       expect.arrayContaining(["min-w-0", "truncate"]),
     );
-    expect(html).toContain('data-subtask-context-usage="true"');
-    expect(html).toContain('data-context-window-state="unavailable"');
+    expect(html).not.toContain("data-subtask-context-usage");
+    expect(html).not.toContain("data-context-window-state");
+    expect(html).toContain("子任务已完成");
+    expect(html).not.toContain("DeepSeek V4 Flash");
+    expect(html).not.toContain("87.5K");
+    expect(html).not.toContain("Tokens");
   });
 });

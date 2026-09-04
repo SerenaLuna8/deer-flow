@@ -223,10 +223,14 @@ secondary controls are sibling buttons outside the link.
 - `present_files` is the explicit published-file boundary; workspace previews
   and live file-tool state do not prove delivery, and delegated scratch files
   are not publishable cards. Unknown workspace-change line counts stay unknown
-  rather than fabricated zeros.
-- Every `task` tool call is its own Sub-Agent card in canonical order. A card
-  exposes Context Usage only with a valid server-owned execution UUID; the Tool
-  Call ID is never substituted as Context authority.
+  rather than fabricated zeros. The artifact panel auto-opens a live
+  `write_file` / `str_replace` only for paths below the `/mnt/user-data/`
+  (or legacy `/mnt/data/`) mount; scratch paths such as `/tmp` stay
+  click-to-open.
+- Every `task` tool call is its own Sub-Agent card in canonical order. Cards
+  show task progress and details without model, cumulative Token, or Context
+  Usage displays; the underlying execution and usage contracts remain intact.
+  The Tool Call ID is never substituted as Context authority.
 
 ### Knowledge bases
 
@@ -234,6 +238,12 @@ secondary controls are sibling buttons outside the link.
   only when the per-project health probe succeeds; 404 `KNOWLEDGE_DISABLED` or
   any probe failure hides it. Reads require `shared_assets.read`; create, edit,
   upload, retry, and delete controls require `shared_assets.edit`.
+- Base cards present the saved retrieval mode, status, description, document
+  count, and relative update time. Unconfigured bases show their setup state;
+  document-level chunk modes are never inferred as base-wide metadata.
+  Cards cap at 24rem and wrap to the available width instead of stretching.
+- On desktop, the in-base menu stays sticky while section content scrolls;
+  short windows let the menu scroll within the available viewport height.
 - `core/knowledge/` owns the strict contracts, query keys, and hooks, with its
   root registered in `scope-registry.ts`. Base and document lists poll every 2
   seconds while a row or task is active; a `deleting` row with `delete_error`
@@ -262,12 +272,18 @@ secondary controls are sibling buttons outside the link.
   base configuration change resets results so a late response cannot resurrect
   them. Diagnostics never show segment text.
 - Governance mutations carry `expected_version`; a 409 keeps the unsaved form
-  and refreshes authoritative rows for re-confirmation. Reparse warns that
-  manual edits, disables, and attachment bindings are replaced; re-embed states
-  what is preserved and reports the real accepted/skipped admission outcome.
-  Knowledge workspace state lives in the URL; the document list is filtered
-  client-side over a completeness-checked full fetch, and an incomplete or
-  drifted read is an explicit error, never a partial table.
+  and refreshes authoritative rows for re-confirmation. A document's
+  `Chunk settings` action is the explicit reparse: a full-width page
+  (`knowledge-document-chunk-settings.tsx`) that shares the wizard's chunking
+  fields, read-only base configuration summary, and preview list, pre-fills
+  the frozen parameters, previews the stored original once on entry (edits
+  mark it stale until refreshed; a replaced request is cancelled and never
+  published), and warns that manual edits, disables, and attachment bindings
+  are replaced. Like uploads it is transient local state, not URL state.
+  Re-embed states what is preserved and reports the real accepted/skipped
+  admission outcome. Knowledge workspace state lives in the URL; the document
+  list is filtered client-side over a completeness-checked full fetch, and an
+  incomplete or drifted read is an explicit error, never a partial table.
 - Segment rows show Token counts only for Token profiles and never invent
   parser identity for null/historical character profiles. Published images are
   attachment-backed Markdown; edit sheets insert only logical refs from the

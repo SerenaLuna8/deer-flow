@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from functools import lru_cache
 from typing import override
 
 from markdown_it import MarkdownIt
@@ -16,8 +17,13 @@ from actweave_knowledge.extraction.contracts import Document
 _BLANK_LINES = re.compile(r"\n{3,}")
 
 
+@lru_cache(maxsize=1)
 def _parser() -> MarkdownIt:
-    return MarkdownIt("commonmark", {"html": False}).enable("table")
+    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
+    # Compile all lazy rule chains before sharing the parser between threads.
+    for ruler in (parser.core.ruler, parser.block.ruler, parser.inline.ruler, parser.inline.ruler2):
+        ruler.getRules("")
+    return parser
 
 
 def _inline_text(token: Token, *, include_image_alt: bool) -> str:
@@ -202,8 +208,9 @@ def _record_table_source(state: StateBlock, start_line: int, end_line: int, sile
     return matched
 
 
+@lru_cache(maxsize=1)
 def _source_parser() -> MarkdownIt:
-    parser = _parser()
+    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
     # Parse all block syntax and references first. Inline attribution happens
     # before text merging can discard the fragments' individual source ranges.
     parser.core.ruler.disable(["inline", "text_join"])
@@ -211,6 +218,9 @@ def _source_parser() -> MarkdownIt:
     parser.block.ruler.at("table", _record_table_source, {"alt": ["paragraph", "reference"]})
     for name, rule in (("escape", escape), ("entity", entity), ("backticks", backtick), ("emphasis", emphasis.tokenize), ("autolink", autolink)):
         parser.inline.ruler.at(name, _record_inline_source(name, rule))
+    # Source rule mutations invalidate caches; rebuild them before sharing.
+    for ruler in (parser.core.ruler, parser.block.ruler, parser.inline.ruler, parser.inline.ruler2):
+        ruler.getRules("")
     return parser
 
 

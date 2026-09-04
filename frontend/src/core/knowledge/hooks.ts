@@ -688,10 +688,18 @@ export function usePreviewKnowledgeDocumentReparse(scope: ProjectClientScope) {
     mutationFn: ({
       documentId,
       input,
+      signal,
     }: {
       documentId: string;
       input: KnowledgeReparseInput;
-    }) => previewKnowledgeDocumentReparse(scope.projectId, documentId, input),
+      signal?: AbortSignal;
+    }) =>
+      previewKnowledgeDocumentReparse(
+        scope.projectId,
+        documentId,
+        input,
+        signal,
+      ),
   });
 }
 

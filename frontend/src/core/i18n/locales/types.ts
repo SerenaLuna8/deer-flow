@@ -206,7 +206,6 @@ export interface Translations {
       rerankerUnavailable: string;
       rebuildSectionTitle: string;
       rebuildModelLabel: string;
-      rebuildHint: string;
       rebuildButton: string;
       rebuildPending: string;
       rebuildOutcome: (accepted: number, skipped: number) => string;
@@ -383,6 +382,7 @@ export interface Translations {
         size: string;
         segments: string;
         words: string;
+        uploadedAt: string;
         actions: string;
       };
       retry: string;
@@ -447,12 +447,11 @@ export interface Translations {
       batchMetadataModeSet: string;
       batchMetadataModeClear: string;
       batchMetadataOverwrite: (count: number) => string;
-      reparse: string;
-      reparseTitle: (name: string) => string;
+      chunkSettings: string;
+      chunkSettingsTitle: (name: string) => string;
+      chunkSettingsCurrentProfile: string;
       reparseWarning: string;
       reparseLegacyUnitWarning: string;
-      reparsePreviewButton: string;
-      reparsePreviewShowing: (shown: number, total: number) => string;
       reparsePreviewAttachmentsOmitted: (count: number) => string;
       reparseSubmit: string;
       reparsePending: string;
@@ -530,6 +529,7 @@ export interface Translations {
       title: string;
       description: string;
       workspaceHint: string;
+      submitHint: string;
       parametersTitle: string;
       outcomeTitle: string;
       waitingTitle: string;

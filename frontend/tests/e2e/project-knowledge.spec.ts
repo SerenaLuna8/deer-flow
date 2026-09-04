@@ -1250,7 +1250,11 @@ async function mockKnowledgeRoutes(
         const nextStatus = item.progression?.shift();
         if (nextStatus !== undefined) {
           item.status = nextStatus;
-          if (item.status === "ready") item.segment_count = 4;
+          if (item.status === "ready") {
+            // A ready document has been published at least once.
+            item.segment_count = 4;
+            item.content_initialized = true;
+          }
           if (item.status === "failed") {
             item.error_message = "Embedding 请求连续失败已耗尽重试";
           }
@@ -2488,6 +2492,40 @@ test("does not continue document uploads after the create wizard unmounts", asyn
   // Give the accepted create response and its async continuation time to run.
   await page.waitForTimeout(500);
   expect(state.uploadCounter).toBe(0);
+});
+
+test("keeps base cards compact on wide screens and fits narrow screens", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await mockKnowledgeRoutes(page, {
+    bases: Array.from({ length: 4 }, (_, index) => ({
+      ...t9Base(),
+      id: `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      name: `Knowledge base ${index + 1}`,
+    })),
+  });
+  await page.goto("/projects/alpha/knowledge");
+  const list = page.getByTestId("knowledge-base-list");
+  const cards = list.locator("li");
+  await expect(cards).toHaveCount(4);
+  const first = (await cards.first().boundingBox())!;
+  const second = (await cards.nth(1).boundingBox())!;
+  const fourth = (await cards.nth(3).boundingBox())!;
+  expect(first.width).toBeLessThanOrEqual(384);
+  expect(Math.abs(fourth.y - first.y)).toBeLessThanOrEqual(1);
+  expect(second.x - first.x - first.width).toBeCloseTo(16, 0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrowCard = (await cards.first().boundingBox())!;
+  expect(narrowCard.width).toBeLessThanOrEqual(358);
+  expect(
+    await list.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  await cards.first().getByRole("button", { name: "View documents" }).click();
+  await expect(page).toHaveURL(/kb=40000000-0000-4000-8000-000000000001/u);
 });
 
 test("creates an unconfigured empty base using only name and description", async ({
@@ -4553,35 +4591,43 @@ test("base settings expose retrieval defaults only as placeholders and empty sea
   await page.goto("/projects/alpha/knowledge");
   await page.getByRole("button", { name: "View documents" }).click();
 
+  // The settings page and the retrieval test share the "Top K" / "Score
+  // threshold" labels, so each lookup is scoped to its own panel region.
+  const searchPanel = page.getByRole("region", { name: "Retrieval test" });
+  const settingsPanel = page.getByRole("region", {
+    name: "Settings",
+    exact: true,
+  });
+
   // The search inputs surface the current defaults as placeholders.
   await page.getByRole("button", { name: "Retrieval test" }).click();
-  await expect(page.getByLabel("Results (top_k)")).toHaveAttribute(
+  await expect(searchPanel.getByLabel("Top K")).toHaveAttribute(
     "placeholder",
     "4",
   );
-  await expect(page.getByLabel("Score threshold")).toHaveAttribute(
+  await expect(searchPanel.getByLabel("Score threshold")).toHaveAttribute(
     "placeholder",
     "0",
   );
-  await expect(page.getByLabel("Results (top_k)").locator("..")).toHaveText(
-    "Results (top_k)",
+  await expect(searchPanel.getByLabel("Top K").locator("..")).toHaveText(
+    "Top K",
   );
-  await expect(page.getByLabel("Score threshold").locator("..")).toHaveText(
-    "Score threshold",
-  );
+  await expect(
+    searchPanel.getByLabel("Score threshold").locator(".."),
+  ).toHaveText("Score threshold");
 
   // Saving new defaults goes through the base PATCH route.
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByLabel("Default results (top_k)").fill("6");
-  await page.getByLabel("Default score threshold").fill("2");
-  await page.getByLabel("Default score threshold").press("Enter");
+  await settingsPanel.getByLabel("Top K").fill("6");
+  await settingsPanel.getByLabel("Score threshold").fill("2");
+  await settingsPanel.getByLabel("Score threshold").press("Enter");
   expect(state.baseUpdates).toHaveLength(0);
   await expect(
     page.getByRole("button", { name: "Save", exact: true }),
   ).toBeDisabled();
-  await page.getByLabel("Default score threshold").fill("0.3");
+  await settingsPanel.getByLabel("Score threshold").fill("0.3");
   // The external field remains associated with the settings form.
-  await page.getByLabel("Default score threshold").press("Enter");
+  await settingsPanel.getByLabel("Score threshold").press("Enter");
   await expect(page.getByText("Saved.")).toBeVisible();
   expect(state.baseUpdates.at(-1)).toMatchObject({
     default_top_k: 6,
@@ -4591,11 +4637,11 @@ test("base settings expose retrieval defaults only as placeholders and empty sea
   // The retrieval test reflects the saved defaults and, with both inputs
   // empty, omits them from the request so the backend resolves the defaults.
   await page.getByRole("button", { name: "Retrieval test" }).click();
-  await expect(page.getByLabel("Results (top_k)")).toHaveAttribute(
+  await expect(searchPanel.getByLabel("Top K")).toHaveAttribute(
     "placeholder",
     "6",
   );
-  await expect(page.getByLabel("Score threshold")).toHaveAttribute(
+  await expect(searchPanel.getByLabel("Score threshold")).toHaveAttribute(
     "placeholder",
     "0.3",
   );
@@ -5181,6 +5227,50 @@ function t9Documents(count: number): MockDocument[] {
     delete_error: null,
   }));
 }
+
+test("keeps the Knowledge menu in place while long document segments scroll", async ({
+  page,
+}) => {
+  const documents = t9Documents(1);
+  const documentId = documents[0]!.id;
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await mockKnowledgeRoutes(page, {
+    bases: [t9Base({ document_count: 1 })],
+    documents,
+    segments: {
+      [documentId]: Array.from({ length: 30 }, (_, index) => ({
+        id: `60000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        position: index + 1,
+        content: `Document segment ${index + 1}. `.repeat(20),
+        enabled: true,
+        source_position: { page: index + 1 },
+      })),
+    },
+  });
+  await page.goto(
+    `/projects/alpha/knowledge?kb=${T9_BASE_ID}&doc=${documentId}`,
+  );
+  const menu = page.getByRole("navigation", {
+    name: "Knowledge base sections",
+  });
+  const segments = page.getByTestId("knowledge-segment-list");
+  await expect(segments).toBeVisible();
+  const menuBefore = (await menu.boundingBox())!;
+  const segmentsBefore = (await segments.boundingBox())!;
+
+  await segments.hover();
+  await page.mouse.wheel(0, 800);
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBeGreaterThan(500);
+
+  const menuAfter = (await menu.boundingBox())!;
+  const segmentsAfter = (await segments.boundingBox())!;
+  expect(Math.abs(menuAfter.y - menuBefore.y)).toBeLessThanOrEqual(1);
+  expect(segmentsBefore.y - segmentsAfter.y).toBeGreaterThan(500);
+  await menu.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/view=settings/u);
+});
 
 test("the URL carries base, view, and document state through reload and history", async ({
   page,
@@ -6594,7 +6684,7 @@ test("batch metadata shows mixed values and applies one all-or-nothing patch", a
   ).not.toContainText("distinct values");
 });
 
-test("reparse previews the split, freezes parameters, and a stale confirmation conflicts", async ({
+test("chunk settings open as a page that previews the current split, freezes edited parameters, and conflicts on a stale confirmation", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -6633,61 +6723,117 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
   await page
     .getByRole("button", { name: "Actions for 重解析文档.txt" })
     .click();
-  await page.getByRole("menuitem", { name: "Reparse from original" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Reparse 重解析文档.txt")).toBeVisible();
-  // The confirmation names what is destroyed and what it costs.
   await expect(
-    dialog.getByText(/Manual segment edits and per-segment disables/),
+    page.getByRole("menuitem", { name: "Reparse from original" }),
+  ).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Chunk settings" }).click();
+
+  // The wizard's configure step, not a dialog: the page replaces the base
+  // detail (no section menu) and the URL still names the document list.
+  const settings = page.getByTestId("knowledge-document-chunk-settings");
+  await expect(
+    settings.getByRole("heading", {
+      name: "Chunk settings · 重解析文档.txt",
+    }),
   ).toBeVisible();
-  await expect(dialog).toContainText(
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Knowledge base sections" }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`kb=${BASE_ID}$`, "u"));
+  await expect(settings.getByRole("button", { name: "Back" })).toContainText(
+    "重解析知识库",
+  );
+
+  // The page names what is destroyed and what it costs.
+  await expect(
+    settings.getByText(/Manual segment edits and per-segment disables/),
+  ).toBeVisible();
+  await expect(settings).toContainText(
     "Published attachment bindings are replaced by the new parse.",
   );
   await expect(
-    dialog.getByText(
+    settings.getByText(
       "This document uses historical character limits. Reparse uses Knowledge Tokens and may change chunk boundaries.",
     ),
   ).toBeVisible();
 
-  // Server-side preview with the edited parameters.
-  await dialog.getByLabel("Chunk size (Knowledge Tokens)").fill("600");
-  await dialog.getByRole("button", { name: "Preview split" }).click();
-  const preview = dialog.getByTestId("knowledge-reparse-preview");
+  // The form starts from the document's frozen parameters, and the base's
+  // saved models are read-only context rather than controls.
+  await expect(
+    settings.getByLabel("Chunk size (Knowledge Tokens)"),
+  ).toHaveValue("1000");
+  await expect(
+    settings.getByLabel("Chunk overlap (Knowledge Tokens)"),
+  ).toHaveValue("100");
+  await expect(settings.getByRole("radio", { name: /General/ })).toBeChecked();
+  const summary = settings.getByTestId("knowledge-base-configuration-summary");
+  await expect(summary).toContainText(
+    "Uses the base’s saved models and retrieval settings.",
+  );
+  await expect(summary).toContainText("SiliconFlow · BAAI/bge-m3");
+  await expect(summary.getByRole("combobox")).toHaveCount(0);
+
+  // Entering the page previews the stored original once with the current
+  // parameters — no click required.
+  const preview = settings.getByTestId("knowledge-reparse-preview");
+  await expect(preview).toContainText("Previewing: 重解析文档.txt");
   await expect(preview).toContainText("Showing 2 of 5 chunks");
   await expect(preview).toContainText(
     "2 preview thumbnails were omitted; published attachments are not lost.",
   );
+  await expect(preview).toContainText("重解析预览首段 · chunk_size=1000");
+  expect(state.reparsePreviewRequests).toHaveLength(1);
+  expect(state.reparsePreviewRequests[0]).toMatchObject({
+    expected_version: 1,
+    chunk_size: 1000,
+    chunking_mode: "general",
+  });
+
+  // Editing a parameter retires the preview until an explicit refresh; the
+  // refresh carries the edited parameters.
+  await settings.getByLabel("Chunk size (Knowledge Tokens)").fill("600");
+  await expect(preview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
+  expect(state.reparsePreviewRequests).toHaveLength(1);
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
   await expect(preview).toContainText("重解析预览首段 · chunk_size=600");
+  await expect(preview).not.toContainText("Preview is out of date");
+  expect(state.reparsePreviewRequests).toHaveLength(2);
   expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
     expected_version: 1,
     chunk_size: 600,
     chunking_mode: "general",
   });
-
-  // Editing a parameter retires the preview: it described another reparse.
-  await dialog.getByLabel("Chunk overlap (Knowledge Tokens)").fill("50");
-  await expect(preview).toHaveCount(0);
+  await settings.getByLabel("Chunk overlap (Knowledge Tokens)").fill("50");
+  await expect(preview).toContainText(
+    "Preview is out of date. Refresh to apply the current settings.",
+  );
 
   // The document changes elsewhere; the stale confirmation must conflict,
-  // keep the dialog and its parameters, and refresh the authoritative row.
+  // keep the page and its parameters, and refresh the authoritative row.
   state.documents[0]!.version = 2;
   const authorityRefresh = page.waitForResponse(
     (response) =>
       response.request().method() === "GET" &&
       response.url().includes(`/bases/${BASE_ID}/documents?page=`),
   );
-  await dialog.getByRole("button", { name: "Reparse", exact: true }).click();
-  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toBeVisible();
+  await settings.getByRole("button", { name: "Reparse", exact: true }).click();
+  await expect(
+    settings.getByTestId("knowledge-reparse-conflict"),
+  ).toBeVisible();
   expect(state.reparseRequests).toHaveLength(1);
   expect(state.reparseRequests.at(-1)).toMatchObject({ expected_version: 1 });
-  await expect(dialog.getByLabel("Chunk size (Knowledge Tokens)")).toHaveValue(
-    "600",
-  );
+  await expect(
+    settings.getByLabel("Chunk size (Knowledge Tokens)"),
+  ).toHaveValue("600");
 
-  // Re-confirming against the refreshed version freezes the parameters.
+  // Re-confirming against the refreshed version freezes the parameters and
+  // returns to the document list.
   await authorityRefresh;
-  await dialog.getByRole("button", { name: "Reparse", exact: true }).click();
-  await expect(dialog).toBeHidden();
+  await settings.getByRole("button", { name: "Reparse", exact: true }).click();
+  await expect(settings).toBeHidden();
   expect(state.reparseRequests.at(-1)).toMatchObject({
     expected_version: 2,
     chunk_size: 600,
@@ -6701,7 +6847,65 @@ test("reparse previews the split, freezes parameters, and a stale confirmation c
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 15_000 });
 });
 
-test("a stale reparse preview conflicts, refreshes the version, and the next attempt succeeds", async ({
+test("cancelling chunk settings returns to the document list without a reparse", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const DOC_ID = "50000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "重解析知识库",
+        description: "",
+        status: "active",
+        document_count: 1,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: DOC_ID,
+        knowledge_base_id: BASE_ID,
+        name: "重解析文档.txt",
+        original_name: "重解析文档.txt",
+        status: "ready",
+        segment_count: 4,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${BASE_ID}&sort=name_asc`);
+  await page
+    .getByRole("button", { name: "Actions for 重解析文档.txt" })
+    .click();
+  await page.getByRole("menuitem", { name: "Chunk settings" }).click();
+  const settings = page.getByTestId("knowledge-document-chunk-settings");
+  await expect(settings).toBeVisible();
+  await settings.getByLabel("Chunk size (Knowledge Tokens)").fill("600");
+
+  await settings.getByRole("button", { name: "Cancel" }).click();
+  await expect(settings).toBeHidden();
+  // The list keeps its URL state, and nothing was submitted.
+  await expect(page).toHaveURL(new RegExp(`kb=${BASE_ID}&sort=name_asc$`, "u"));
+  await expect(
+    page.getByTestId("knowledge-document-rows").getByText("重解析文档.txt"),
+  ).toBeVisible();
+  expect(state.reparseRequests).toHaveLength(0);
+
+  // Reopening starts again from the frozen parameters, not the abandoned edit.
+  await page
+    .getByRole("button", { name: "Actions for 重解析文档.txt" })
+    .click();
+  await page.getByRole("menuitem", { name: "Chunk settings" }).click();
+  await expect(
+    settings.getByLabel("Chunk size (Knowledge Tokens)"),
+  ).toHaveValue("1000");
+});
+
+test("a stale chunk-settings preview conflicts, refreshes the version, and the next refresh succeeds", async ({
   page,
 }) => {
   const BASE_ID = "40000000-0000-4000-8000-000000000001";
@@ -6736,12 +6940,11 @@ test("a stale reparse preview conflicts, refreshes the version, and the next att
   await page
     .getByRole("button", { name: "Actions for 重解析文档.txt" })
     .click();
-  await page.getByRole("menuitem", { name: "Reparse from original" }).click();
-  const dialog = page.getByRole("dialog");
-  const preview = dialog.getByTestId("knowledge-reparse-preview");
+  await page.getByRole("menuitem", { name: "Chunk settings" }).click();
+  const settings = page.getByTestId("knowledge-document-chunk-settings");
+  const preview = settings.getByTestId("knowledge-reparse-preview");
 
-  await dialog.getByRole("button", { name: "Preview split" }).click();
-  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("Showing 2 of 5 chunks");
   expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
     expected_version: 1,
   });
@@ -6755,20 +6958,27 @@ test("a stale reparse preview conflicts, refreshes the version, and the next att
       response.request().method() === "GET" &&
       response.url().includes(`/bases/${BASE_ID}/documents?page=`),
   );
-  await dialog.getByRole("button", { name: "Preview split" }).click();
-  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toBeVisible();
+  await preview.getByRole("button", { name: "Refresh preview" }).click();
+  await expect(
+    settings.getByTestId("knowledge-reparse-conflict"),
+  ).toBeVisible();
+  await expect(preview).not.toContainText("Showing 2 of 5 chunks");
   await authorityRefresh;
 
   // Re-previewing against the refreshed version succeeds and retires the
   // conflict notice.
   await expect(async () => {
-    await dialog.getByRole("button", { name: "Preview split" }).click();
-    await expect(preview).toBeVisible({ timeout: 2_000 });
+    await preview.getByRole("button", { name: "Refresh preview" }).click();
+    await expect(preview).toContainText("Showing 2 of 5 chunks", {
+      timeout: 2_000,
+    });
   }).toPass();
   expect(state.reparsePreviewRequests.at(-1)).toMatchObject({
     expected_version: 2,
   });
-  await expect(dialog.getByTestId("knowledge-reparse-conflict")).toHaveCount(0);
+  await expect(settings.getByTestId("knowledge-reparse-conflict")).toHaveCount(
+    0,
+  );
 });
 
 test("a batch metadata conflict refreshes the selection for re-confirmation", async ({

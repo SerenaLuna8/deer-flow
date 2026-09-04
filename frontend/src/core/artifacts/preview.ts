@@ -109,6 +109,15 @@ export function advanceWriteArtifactAutoOpenState({
   };
 }
 
+const USER_DATA_MOUNT_PREFIX = /^\/mnt\/(?:data|user-data)\//u;
+
+export function isUserDataArtifactPath(filepath: string) {
+  return USER_DATA_MOUNT_PREFIX.test(filepath);
+}
+
+// Scratch writes outside the user-data mount (for example `/tmp` test
+// drivers) never auto-open the artifact panel; clicking the tool step still
+// opens them.
 export function extractWriteArtifactSelections(
   messages: ArtifactPreviewMessage[],
 ): WriteArtifactSelection[] {
@@ -120,7 +129,7 @@ export function extractWriteArtifactSelections(
         (toolCall.name !== "write_file" && toolCall.name !== "str_replace") ||
         !toolCall.id ||
         typeof toolCall.args?.path !== "string" ||
-        !toolCall.args.path
+        !isUserDataArtifactPath(toolCall.args.path)
       ) {
         continue;
       }
@@ -204,9 +213,7 @@ function parseWriteFileArtifact(filepath: string) {
 }
 
 function normalizeArtifactLogicalPath(filepath: string) {
-  return filepath
-    .replace(/^\/mnt\/(?:data|user-data)\//u, "")
-    .replace(/^\/+/, "");
+  return filepath.replace(USER_DATA_MOUNT_PREFIX, "").replace(/^\/+/, "");
 }
 
 export function resolveDurableArtifactSelection(

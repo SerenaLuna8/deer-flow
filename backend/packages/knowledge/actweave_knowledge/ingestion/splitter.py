@@ -25,7 +25,7 @@ from .extractor import ExtractedBlock
 from .index_text import build_index_text, has_indexable_source_text
 from .source_mapping import clip_source_spans
 from .structure import StructureUnit, context_unit, inline_atoms, join_units, slice_unit, structure_groups, trim_unit
-from .tokenizer import TOKENIZER_PROFILE_ID, count_knowledge_tokens, tokenizer_fingerprint
+from .tokenizer import TOKENIZER_PROFILE_ID, PrefixTokenCounter, count_knowledge_tokens, tokenizer_fingerprint
 
 _LINE_BREAKS = re.compile(r"\r\n?")
 _EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
@@ -250,14 +250,18 @@ def _pack_pieces(pieces: list[str], *, chunk_size: int, chunk_overlap: int) -> l
     return chunks
 
 
-def fits_chunk(markdown: str, token_limit: int) -> bool:
+def fits_chunk(markdown: str, token_limit: int, *, counters: tuple[PrefixTokenCounter, PrefixTokenCounter] | None = None) -> bool:
     """Both display and actual index input must fit; characters remain capped.
 
     The cheap character bound runs first so oversized candidates never reach
     the tokenizer; ``KNOWLEDGE_MAX_SEGMENT_CHARS`` exists for the tool-message
     and editor budgets, not as a second chunk-size knob.
     """
-    return len(markdown) <= KNOWLEDGE_MAX_SEGMENT_CHARS and count_knowledge_tokens(markdown) <= token_limit and count_knowledge_tokens(build_index_text(markdown)) <= token_limit
+    if len(markdown) > KNOWLEDGE_MAX_SEGMENT_CHARS:
+        return False
+    count_display = counters[0].count if counters is not None else count_knowledge_tokens
+    count_index = counters[1].count if counters is not None else count_knowledge_tokens
+    return count_display(markdown) <= token_limit and count_index(build_index_text(markdown)) <= token_limit
 
 
 def _prefix_error() -> ExtractionError:
@@ -541,6 +545,9 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
                     yield trim_unit(piece)
         return
     pending: list[StructureUnit] = []
+    # Display Markdown and index text grow independently. Keep their prefix
+    # counters local to this group; never retain document text across splits.
+    counters = (PrefixTokenCounter(), PrefixTokenCounter())
     fresh = False
     for unit in units:
 
@@ -573,7 +580,7 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
                 break
             continuation = piece.kind == "text_fragment" and piece_index > 0
             candidate = _append_piece(pending, piece, continuation=continuation)
-            if pending and not fits_chunk(_render(prefix, candidate, separator).content, limit):
+            if pending and not fits_chunk(_render(prefix, candidate, separator).content, limit, counters=counters):
                 if not _has_source_text(join_units(pending, separator)) and _has_source_text(piece):
                     # A leading image is still awaiting real text. Subdivide
                     # the incoming source with that image's budget reserved,
@@ -633,7 +640,7 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
                             break
                         retained = tail
                 pending = retained
-                while pending and not fits_chunk(_render(prefix, [*pending, piece], separator).content, limit):
+                while pending and not fits_chunk(_render(prefix, [*pending, piece], separator).content, limit, counters=counters):
                     pending.pop(0)
                 fresh = False
                 candidate = [*pending, piece]

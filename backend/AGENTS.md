@@ -401,6 +401,11 @@ tests; patch a façade only where the façade itself still calls the seam.
 - Published `content` is the Markdown shown to users and Agents; embedding,
   lexical indexing, reranking, and summaries use the persisted `index_text`,
   and an empty `index_text` on a token profile fails closed.
+- Index-text and source-attribution parsers have independent, precompiled,
+  immutable rule configurations. Prefix Token counters belong to one packing
+  group, separately for display and index text; reuse only proven boundaries
+  of the frozen tokenizer pattern, otherwise count the full text. Optimizations
+  must preserve chunk boundaries, budgets, source spans, and warnings.
 - Embedding/Reranker models are PostgreSQL-administered through their Model
   Provider's encrypted key. A Provider Model referenced by any Base cannot be
   disabled or deleted; a configured Base changes embedding only through rebuild.

@@ -119,7 +119,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   再重新计算。尚无视觉 Token 上界时仍显示含图片数量的上下文下界，但不会绕过 Provider
   容量保护。Token 用量展示开关只影响累计明细和诊断展示，不关闭 Context Evidence、
   Projection、自动压缩或最终容量判断。
-- Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。每个
+- Sub-Agent、Guardrail、Tool Search、ToolCallControl 和可扩展工具链。会话中的子任务卡片
+  显示任务进度与详情，不显示模型、累计 Token 和上下文用量；模型执行、用量统计和上下文
+  管理功能保持不变。每个
   Sub-Agent Task 直接写入的输出先进入各自的隔离草稿，只有 Lead 明确复制并调用
   `present_files` 后才作为主会话文件交付；文件变更的校验与持久化仍由后端执行，无法
   可靠计算的行数保持未知，但普通会话不再渲染文件变更卡片。
@@ -129,7 +131,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 可选的项目 RAG 知识库（Knowledge）：独立 `actweave-knowledge` 软件包提供文档上传、
   摄取切分、向量召回加 Reranker 精排检索和 Agent `knowledge_search` 引用；文件存储在
-  外部 MinIO。全新 `setup-db` 同时收到完整的
+  外部 MinIO。知识库卡片按名称与检索方式、描述、文档数与相对更新时间组织信息，
+  使用紧凑宽度并随可用空间自动换列。
+  桌面详情页滚动文档或分段时，左侧知识库菜单保持可见。
+  全新 `setup-db` 同时收到完整的
   `ACT_WEAVE_KNOWLEDGE_MINIO_ENDPOINT`、`ACT_WEAVE_KNOWLEDGE_MINIO_BUCKET`、
   `ACT_WEAVE_KNOWLEDGE_MINIO_ACCESS_KEY` 与 `ACT_WEAVE_KNOWLEDGE_MINIO_SECRET_KEY`
   时，会在建库前探测管理员预建的未版本化 bucket，并加密写入配置、默认启用；
@@ -162,7 +167,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   （内容修改同步重算 Token、索引文本、向量、词法索引、父子块和当前已发布图片绑定，
   每批及重试前复核权限；人工替换的文字不保留无法证明的原文件位置）
   及字数统计，维护操作同步刷新已打开的分段定位；文档列表支持搜索/状态过滤/排序/分页，
-  跨页读取发生总数变化或重复条目时明确提示刷新，不显示伪完整列表。处理中的文档展示真实任务进度（阶段、已验证批次
+  每行显示状态、启用开关、分段数（含分段模式）与字符数，上传时间与文件大小按表格容器宽度
+  渐进显示，跨页读取发生总数变化或重复条目时明确提示刷新，不显示伪完整列表。处理中的文档展示真实任务进度（阶段、已验证批次
   计数、尝试次数与自动重试等待），列表上方汇总处理中/等待重试/失败/就绪数量；上传按
   递归分隔符切分，可自定义分隔符（默认 `\n\n`）并选择预处理规则（压缩多余空白、
   删除 URL 与邮箱），创建向导使用分段模式卡片和左右独立滚动的配置／预览区（预览与实际摄取一致，
@@ -173,9 +179,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   不绑定模型，也不要求选择检索方式。已有知识库上传文档与新建共用“选择文件 → 分段预览 → 处理结果”三步向导。
   未配置空库在第二步设置 Embedding、检索方式及可选 Reranker，或提前在设置页配置；
   已配置知识库沿用现有模型与检索设置，多文件上传失败时仅重试失败文件；未配置的空库不参与检索。文档创建向导及设置页可保存检索模式，
-  设置页可配置检索默认参数
-  （top_k、分数阈值与可选的相对截断比例——低于本库最高原生分该比例的候选被淘汰，
-  检索测试与 Agent 工具未显式传参时生效）与检索模式
+  设置页的“检索设置”区块在选中的检索路线卡片内配置 Reranker、Top K 与 Score 阈值
+  （检索测试与 Agent 工具未显式传参时生效；可选的相对截断比例——低于本库最高原生分
+  该比例的候选被淘汰——目前仅通过知识库 API 的 `default_relative_cutoff` 设置）与检索模式
   （向量检索 `semantic` 或混合检索 `hybrid`：词法 `lexical_v1` 分词走 PostgreSQL tsvector/GIN 与
   向量路 RRF 合并，检索测试可单次覆盖模式；查询侧只使用汉字二元组并过滤虚词/停用词，
   过长查询截取前 128 个词元而不再报错；无 Reranker 时词法路命中不受 cosine 阈值淘汰，
@@ -198,8 +204,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Agent 工具支持按元数据条件过滤（等于/包含/范围，AND 组合）；
   设置页可换绑 Embedding 模型并对已发布文档重嵌入（不读取或重解析原文件，保留分段 UUID/Markdown/
   来源、图片绑定、解析参数、人工编辑和启停状态，仅从已发布索引文本重算向量，处理期间退出召回，未发布文档跳过并报
-  真实计数），文档操作里可从原文件重新解析（可改切分参数并先服务端预览，
-  确认后替换全部分段、覆盖人工编辑与启停），并可按库选配或解绑 Reranker
+  真实计数），文档操作里的“分段设置”进入与上传向导第二步同布局的整页：左侧预填该文档
+  当前分段参数并只读展示知识库沿用的模型与检索配置，右侧进入即自动生成服务端分段预览、
+  修改参数后标记过期需显式刷新，确认后从原文件重新解析并替换全部分段、覆盖人工编辑与启停；
+  版本冲突时保留未提交的参数并刷新最新版本供再次确认。知识库并可按库选配或解绑 Reranker
   模型（保存即生效，无需重建）；创建向导也可直接选择可选的 Reranker 模型，
   向量检索与混合检索均支持，不选择则沿用无重排序的流程。Agent `knowledge_search` 引用返回 64KiB
   预算内的完整索引文本正文（与 Embedding/Reranker 所见一致，不含 Markdown 转义与图片引用；
@@ -220,6 +228,7 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   回退边界补齐中英文句末与子句标点、超预算的标题路径/表头降级为截短的上下文前缀并给出
   `CONTEXT_PREFIX_TRUNCATED` / `OVERSIZED_PREFIX_SPLIT` 警告而不再让整篇文档失败；
   历史文档保持原参数，重试若遇到不可用的历史版本需显式重新解析。
+  分段测量复用 Markdown 解析器与安全前缀的 Token 计数，保持分段边界、来源映射和预算不变。
   Embedding 批次以有界并发派发并带退避重试，摘要任务分批生成并发布，
   超时或失败只重做未完成的分段。
   格式解析限制为本地文件，默认 `builtin`，可选 `unstructured_local`；

@@ -3,6 +3,7 @@
 import {
   BookOpenIcon,
   ChevronRightIcon,
+  FileTextIcon,
   FolderPlusIcon,
   PlusIcon,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import type {
   KnowledgeBaseStatus,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
+import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
 import { knowledgeErrorMessage } from "./knowledge-error";
@@ -137,45 +139,65 @@ export function KnowledgeBasesView({
         )
       ) : (
         <ol
-          className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+          className="grid grid-cols-[repeat(auto-fill,min(100%,24rem))] gap-4"
           data-testid="knowledge-base-list"
         >
           {bases.data?.items.map((base) => (
             <li
               key={base.id}
-              className="border-border/80 bg-card hover:border-selection/30 flex min-w-0 flex-col rounded-xl border p-4 shadow-xs transition-[border-color,box-shadow] hover:shadow-sm"
+              className="border-border/60 bg-card hover:border-selection/30 flex min-w-0 flex-col rounded-2xl border p-5 shadow-xs transition-[border-color,box-shadow] hover:shadow-sm"
             >
               <button
                 type="button"
-                className="focus-visible:ring-ring min-w-0 flex-1 rounded-md text-left focus-visible:ring-2 focus-visible:outline-none"
+                className="focus-visible:ring-ring flex min-w-0 flex-1 flex-col rounded-lg text-left focus-visible:ring-2 focus-visible:outline-none"
                 onClick={() => onOpenBase(base)}
               >
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="bg-selection-subtle/70 text-selection flex size-8 shrink-0 items-center justify-center rounded-lg">
-                    <BookOpenIcon aria-hidden className="size-4" />
+                <span className="flex w-full min-w-0 items-center gap-3.5">
+                  <span className="border-selection/10 bg-selection-subtle/70 text-selection flex size-12 shrink-0 items-center justify-center rounded-2xl border">
+                    <BookOpenIcon aria-hidden className="size-6" />
                   </span>
-                  <span className="text-foreground min-w-0 truncate text-[13px] font-medium">
-                    {base.name}
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className="text-foreground block truncate text-base font-semibold"
+                      title={base.name}
+                    >
+                      {base.name}
+                    </span>
+                    <span className="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                      <Badge
+                        variant={baseStatusVariant(base.status)}
+                        className={cn(
+                          "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+                          base.status === "active" &&
+                            base.embedding_model_id !== null &&
+                            "border-success/15 bg-success/10 text-emerald-700 dark:text-emerald-300",
+                          (base.status === "disabled" ||
+                            base.embedding_model_id === null) &&
+                            "border-border/60 bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {base.status === "active" &&
+                        base.embedding_model_id === null
+                          ? labels.bases.unconfigured
+                          : labels.status[base.status]}
+                      </Badge>
+                      {base.embedding_model_id !== null && (
+                        <>
+                          <span
+                            aria-hidden
+                            className="text-muted-foreground/40"
+                          >
+                            ·
+                          </span>
+                          <span>
+                            {labels.bases.retrievalModes[base.retrieval_mode]}
+                          </span>
+                        </>
+                      )}
+                    </span>
                   </span>
-                  <Badge
-                    variant={baseStatusVariant(base.status)}
-                    className={cn(
-                      "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
-                      base.status === "active" &&
-                        base.embedding_model_id !== null &&
-                        "border-success/15 bg-success/10 text-emerald-700 dark:text-emerald-300",
-                      (base.status === "disabled" ||
-                        base.embedding_model_id === null) &&
-                        "border-border/60 bg-muted text-muted-foreground",
-                    )}
-                  >
-                    {base.status === "active" &&
-                    base.embedding_model_id === null
-                      ? labels.bases.unconfigured
-                      : labels.status[base.status]}
-                  </Badge>
                 </span>
-                <span className="text-muted-foreground mt-2 line-clamp-2 block text-[13px] leading-5">
+                <span className="text-muted-foreground mt-4 line-clamp-2 min-h-11 text-sm leading-[22px]">
                   {base.description || labels.bases.noDescription}
                 </span>
                 {base.delete_error ? (
@@ -184,14 +206,28 @@ export function KnowledgeBasesView({
                   </span>
                 ) : null}
               </button>
-              <div className="border-border/60 mt-3 flex items-center justify-between gap-2 border-t pt-3">
-                <span className="text-muted-foreground min-w-0 truncate text-xs">
-                  {labels.bases.documentCount(base.document_count)}
-                  {" · "}
-                  {labels.bases.updatedAt(
-                    new Date(base.updated_at).toLocaleDateString(locale),
-                  )}
-                </span>
+              <div className="mt-4 flex items-center justify-between gap-2">
+                <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                    <FileTextIcon
+                      aria-hidden
+                      className="text-muted-foreground/60 size-3.5 shrink-0"
+                    />
+                    {labels.bases.documentCount(base.document_count)}
+                  </span>
+                  <span aria-hidden className="text-muted-foreground/30">
+                    /
+                  </span>
+                  <time
+                    className="min-w-0 truncate"
+                    dateTime={base.updated_at}
+                    title={new Date(base.updated_at).toLocaleString(locale)}
+                  >
+                    {labels.bases.updatedAt(
+                      formatTimeAgo(base.updated_at, locale),
+                    )}
+                  </time>
+                </div>
                 <div className="flex shrink-0 items-center gap-1">
                   {canEdit ? (
                     <Button

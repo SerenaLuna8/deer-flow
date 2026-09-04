@@ -1,3 +1,41 @@
+# Knowledge base card width refinement
+
+final result: passed
+
+The user's width correction supersedes the earlier 545px card measurement below. Cards now cap at 384px and fill additional columns instead of stretching. At a 320px viewport, the card is 288px wide with no horizontal overflow; footer metadata wraps and both actions remain visible. Existing typography, colors, icons and content remain unchanged.
+
+Visual evidence: `/Users/jiangfeng/.codex/visualizations/2026/09/04/01a06be8-a1ae-7da1-8e4a-558fe5e11315/knowledge-card-compact.png` and `/tmp/knowledge-card-compact-mobile.png`. The 1920px browser regression verifies four compact cards share a row with 16px gaps, then checks 390px sizing and opening a base. Static checks, 1219 unit tests, the focused browser regression and the production build passed.
+
+---
+
+# Knowledge base card visual QA
+
+final result: passed
+
+- Scope: adapt the supplied card reference to the existing Knowledge Base contract and design system.
+- Reference: `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-1374e4d7-3147-48d5-8b4b-11a9a5362ff9.png` (1146 × 610 pixels; source browser density unknown).
+- Rendered page: http://localhost:2026/projects/default-project/knowledge, authenticated local Chrome, light theme.
+- Desktop: 1971 × 1009 CSS viewport; browser deviceScaleFactor 2, screenshot API normalized to 1971 × 1009 pixels. Card crop: 545 × 196 pixels.
+- Mobile: 390 × 844 viewport and screenshot; document width 390, list width and scroll width both 358. Viewport override reset after verification.
+- Evidence directory: `/Users/jiangfeng/.codex/visualizations/2026/09/04/01a06be8-a1ae-7da1-8e4a-558fe5e11315/`.
+- Evidence files: `knowledge-card-before.png`, `knowledge-card-after.png`, `knowledge-card-detail.png`, `knowledge-card-mobile.png`.
+
+The reference and rendered card crop were opened together for comparison. This is a reference-based adaptation, not a pixel-identical clone: the live base has no description; its honest empty state occupies the reserved description area. Source-only tags, quality, parent-child mode and Agent counts have no Knowledge Base fields and are omitted. Existing blue book icon, status, Delete and View documents controls are retained.
+
+| Surface            | Result                                                                                                                                              |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Typography         | Stronger 16px title, secondary status/retrieval row, 14px description and compact footer; long titles retain truncation and a full-title tooltip.   |
+| Spacing            | Enlarged icon, rounded card, two-line description area and footer without the previous divider follow the reference hierarchy.                      |
+| Colors             | Existing card, selection and status tokens preserve the app's visual language and theme support.                                                    |
+| Image/icon quality | Existing Lucide book/document icons remain sharp and unclipped; no new bitmap assets are needed.                                                    |
+| Content            | Saved retrieval mode, document count and relative update time use authoritative fields; unconfigured and delete-error states have focused coverage. |
+
+Interactions verified in the live browser: View documents opens the document list; Enter on the card opens the same list; Back returns to cards; Delete opens the correct confirmation and Cancel closes it without deleting data. Browser console reported no errors. Desktop and mobile comparisons found no actionable P0/P1/P2 issues.
+
+Validation: `pnpm check`, `pnpm test` (1219 passing), production build, changed-file Prettier and `git diff --check` passed. Mocked Playwright covers empty-base creation, deletion and read-only access separately from the live visual check.
+
+---
+
 # Knowledge reference redesign — 2026-08-31
 
 final result: passed

@@ -21,24 +21,17 @@ import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
-import { useModels } from "@/core/models/hooks";
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
-import {
-  formatSubtaskTokenUsage,
-  resolveSubtaskModelLabel,
-} from "@/core/tasks/presentation";
 import { stepsForDisplay } from "@/core/tasks/steps";
-import { useThreadContextUsage } from "@/core/threads/hooks";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
-import { ContextWindowIndicator } from "../context-window-indicator";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
@@ -57,7 +50,6 @@ export function SubtaskCard({
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const task = useSubtask(taskId)!;
-  const { models, tokenUsageEnabled } = useModels();
   const approvalStatus = task.executionApproval?.status;
   const approvalIsPaused =
     approvalStatus === "pending" || approvalStatus === "approved";
@@ -68,24 +60,6 @@ export function SubtaskCard({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(visuallyRunning);
   const updateSubtask = useUpdateSubtask();
   const privateWork = useProjectPrivateWorkScope();
-  const contextUsage = useThreadContextUsage(threadId, {
-    enabled: Boolean(threadId && task.executionId),
-    subject: task.executionId
-      ? { kind: "subagent_task", executionId: task.executionId }
-      : { kind: "lead_thread" },
-    privateWork,
-  });
-  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
-  const tokenLabel = tokenUsageEnabled
-    ? formatSubtaskTokenUsage(task.usage)
-    : undefined;
-  const runtimeUsageLabel = tokenUsageEnabled
-    ? tokenLabel
-      ? `${tokenLabel} ${t.tokenUsage.label}`
-      : task.status === "in_progress"
-        ? undefined
-        : t.tokenUsage.unavailableShort
-    : undefined;
   const stopReasonLabel = task.stopReason
     ? t.subtasks.stopReasons[task.stopReason]
     : undefined;
@@ -191,19 +165,6 @@ export function SubtaskCard({
                       task.status === "failed" ? "text-red-500 opacity-67" : "",
                     )}
                   >
-                    {modelLabel && (
-                      <span className="max-w-32 truncate" title={modelLabel}>
-                        {modelLabel}
-                      </span>
-                    )}
-                    {runtimeUsageLabel && (
-                      <span
-                        className="max-w-28 truncate"
-                        title={runtimeUsageLabel}
-                      >
-                        {runtimeUsageLabel}
-                      </span>
-                    )}
                     {icon}
                     <FlipDisplay
                       className="max-w-[420px] truncate pb-1"
@@ -229,16 +190,6 @@ export function SubtaskCard({
               </div>
             </div>
           </Button>
-          {threadId && task.executionId && (
-            <div className="shrink-0" data-subtask-context-usage>
-              <ContextWindowIndicator
-                className="size-8"
-                error={contextUsage.error}
-                isLoading={contextUsage.isLoading}
-                usage={contextUsage.data}
-              />
-            </div>
-          )}
         </div>
         <ChainOfThoughtContent className="px-4 pb-4">
           {task.prompt && (

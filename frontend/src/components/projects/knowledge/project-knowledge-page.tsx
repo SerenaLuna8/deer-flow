@@ -17,10 +17,12 @@ import {
   type KnowledgeNavigationState,
 } from "@/core/knowledge/navigation";
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
+import { cn } from "@/lib/utils";
 
 import { KnowledgeBaseDetail } from "./knowledge-base-detail";
 import { KnowledgeBasesView } from "./knowledge-bases-view";
 import { KnowledgeCreateWizard } from "./knowledge-create-wizard";
+import { KnowledgeDocumentChunkSettings } from "./knowledge-document-chunk-settings";
 
 const KNOWLEDGE_PAGE_CLASS_NAME =
   "w-full min-w-0 px-4 py-6 text-[13px] leading-5 [--muted:#f0f2f5] [--primary:#155dfc] [--primary-foreground:#fff] [--ring:#60a5fa] [--selection:#155dfc] [--selection-subtle:#eff6ff] sm:px-6 lg:px-8 dark:[--muted:#24272e] dark:[--selection:#60a5fa] dark:[--selection-subtle:#172554]";
@@ -47,14 +49,19 @@ export function ProjectKnowledgePage() {
   );
   const [wizardOpen, setWizardOpen] = useState(false);
   const [uploadBaseId, setUploadBaseId] = useState<string | null>(null);
+  const [chunkSettingsDocumentId, setChunkSettingsDocumentId] = useState<
+    string | null
+  >(null);
   const [createOpen, setCreateOpen] = useState(false);
   const bases = useKnowledgeBases(scope);
   const navigationKey = `${scope.accountId}:${scope.projectId}:${pathname}?${searchParams.toString()}`;
 
-  // Upload files are transient. Browser history or a scope change exits the
-  // session, so reopening the same base returns to its document list.
+  // Upload files and an open chunk settings page are transient editing
+  // sessions. Browser history or a scope change exits them, so reopening the
+  // same base returns to its document list.
   useEffect(() => {
     setUploadBaseId(null);
+    setChunkSettingsDocumentId(null);
   }, [navigationKey]);
 
   const navigate = useCallback(
@@ -153,6 +160,22 @@ export function ProjectKnowledgePage() {
       );
     }
 
+    // A document's chunk settings share the wizard's full-width configure
+    // step; the page resolves the live row itself and exits on success.
+    if (canEdit && chunkSettingsDocumentId !== null) {
+      return (
+        <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
+          <KnowledgeDocumentChunkSettings
+            key={`${scope.accountId}:${scope.projectId}:${chunkSettingsDocumentId}:chunk-settings`}
+            scope={scope}
+            base={currentBase}
+            documentId={chunkSettingsDocumentId}
+            onExit={() => setChunkSettingsDocumentId(null)}
+          />
+        </main>
+      );
+    }
+
     // Readers may hold a metadata/settings URL without the edit capability;
     // the URL is not an authorization, so the view degrades to documents.
     const view =
@@ -170,13 +193,18 @@ export function ProjectKnowledgePage() {
           navState={{ ...navState, view }}
           onNavigate={navigate}
           onUploadDocuments={() => setUploadBaseId(currentBase.id)}
+          onOpenChunkSettings={(document) =>
+            setChunkSettingsDocumentId(document.id)
+          }
         />
       </main>
     );
   }
 
   return (
-    <main className={KNOWLEDGE_PAGE_CLASS_NAME}>
+    // The base list is a catalog page like Agents; it shares their centered
+    // max-width. Base detail views keep the full width for their side nav.
+    <main className={cn(KNOWLEDGE_PAGE_CLASS_NAME, "mx-auto max-w-6xl")}>
       <ProjectPageHeader
         className="mb-5 [&_h1]:text-xl [&_p]:text-[13px]"
         title={labels.page.title}

@@ -106,6 +106,27 @@ def test_display_budget_and_character_cap_are_independent_of_index_budget():
     assert sum(d.content.count("https://example.test/") for d in drafts) == 1
 
 
+def test_word_level_packing_re_encodes_only_the_appended_words(monkeypatch: pytest.MonkeyPatch):
+    """Measuring the whole candidate per word makes an unpunctuated paragraph quadratic in its length."""
+    from actweave_knowledge.ingestion import tokenizer
+
+    real = tokenizer._encoder()
+    encoded_lengths: list[int] = []
+
+    class RecordingEncoder:
+        def encode_ordinary(self, value: str) -> list[int]:
+            encoded_lengths.append(len(value))
+            return real.encode_ordinary(value)
+
+    monkeypatch.setattr(tokenizer, "_encoder", RecordingEncoder)
+    text = "# 无标点长段\n\n" + " ".join(f"word{i}" for i in range(4000))
+    drafts = split([make_document(text)], size=1000, overlap=0)
+    encoded_during_split = sum(encoded_lengths)
+    assert_budgets(drafts, size=1000)
+    assert "".join(d.content for d in drafts).count("word") == 4000
+    assert encoded_during_split < 40 * len(text)
+
+
 def test_large_token_budgets_are_reachable_for_english_text():
     """4000 tokens of English is ~16000 characters: the old 4000-character
     ceiling silently capped every English chunk near 1000 tokens."""

@@ -1,19 +1,21 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
   DownloadIcon,
-  FileCog2Icon,
+  FileTextIcon,
   ListTreeIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RotateCcwIcon,
   SearchIcon,
+  SearchXIcon,
+  SlidersHorizontalIcon,
   TagsIcon,
   Trash2Icon,
   UploadIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -51,21 +53,8 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   isKnowledgeAuthorityBoundaryError,
-  isKnowledgeConflictError,
   knowledgeDocumentDownloadURL,
 } from "@/core/knowledge/api";
-import {
-  isChildChunkSizeValid,
-  isChunkOverlapValid,
-  isChunkSeparatorValid,
-  isChunkSizeValid,
-  KNOWLEDGE_CHILD_CHUNK_SIZE_MAX,
-  KNOWLEDGE_CHILD_CHUNK_SIZE_MIN,
-  KNOWLEDGE_CHUNK_OVERLAP_MAX,
-  KNOWLEDGE_CHUNK_OVERLAP_MIN,
-  KNOWLEDGE_CHUNK_SIZE_MAX,
-  KNOWLEDGE_CHUNK_SIZE_MIN,
-} from "@/core/knowledge/chunk-settings";
 import {
   deriveKnowledgeDocumentList,
   type KnowledgeDocumentListView,
@@ -75,9 +64,7 @@ import {
   useDeleteKnowledgeDocuments,
   useKnowledgeDocuments,
   useKnowledgeMetadataFields,
-  usePreviewKnowledgeDocumentReparse,
   useRenameKnowledgeDocument,
-  useReparseKnowledgeDocument,
   useRetryKnowledgeDocument,
   useSetKnowledgeDocumentMetadata,
   useSetKnowledgeDocumentsEnabled,
@@ -88,19 +75,13 @@ import type {
   KnowledgeNavigationState,
 } from "@/core/knowledge/navigation";
 import { parseWarningSummary } from "@/core/knowledge/processing-profile";
-import { knowledgeQueryKey } from "@/core/knowledge/query-keys";
 import { formatKnowledgeSourcePosition } from "@/core/knowledge/source-position";
-import {
-  DEFAULT_CHILD_CHUNK_SEPARATOR,
-  DEFAULT_CHUNK_SEPARATOR,
-  type KnowledgeBaseItem,
-  type KnowledgeChunkingMode,
-  type KnowledgeDocumentItem,
-  type KnowledgeDocumentStatus,
-  type KnowledgeMetadataFieldItem,
-  type KnowledgeReparseInput,
-  type KnowledgeReparsePreviewResponse,
-  type KnowledgeTaskProgress,
+import type {
+  KnowledgeBaseItem,
+  KnowledgeDocumentItem,
+  KnowledgeDocumentStatus,
+  KnowledgeMetadataFieldItem,
+  KnowledgeTaskProgress,
 } from "@/core/knowledge/types";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
@@ -149,6 +130,23 @@ function formatSizeBytes(sizeBytes: number): string {
   return `${sizeBytes} B`;
 }
 
+function DocumentsEmptyState({
+  icon: Icon,
+  message,
+}: {
+  icon: LucideIcon;
+  message: string;
+}) {
+  return (
+    <div className="border-border/60 flex flex-col items-center gap-3 rounded-xl border border-dashed px-4 py-14 text-center">
+      <span className="bg-muted text-muted-foreground inline-flex size-10 items-center justify-center rounded-lg">
+        <Icon aria-hidden className="size-5" strokeWidth={1.5} />
+      </span>
+      <p className="text-muted-foreground text-[13px]">{message}</p>
+    </div>
+  );
+}
+
 function DocumentErrorMessage({ message }: { message: string }) {
   return (
     <div role="status" aria-live="polite" aria-atomic="true">
@@ -156,7 +154,7 @@ function DocumentErrorMessage({ message }: { message: string }) {
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="text-destructive mt-1 line-clamp-2 w-full max-w-56 cursor-help text-left text-xs leading-4 break-words"
+            className="text-destructive mt-1 line-clamp-2 w-full cursor-help text-left text-xs leading-4 break-words"
           >
             {message}
           </button>
@@ -270,6 +268,7 @@ export function KnowledgeDocumentsView({
   navState,
   onNavigate,
   onUploadDocuments,
+  onOpenChunkSettings,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -280,6 +279,8 @@ export function KnowledgeDocumentsView({
     mode: "push" | "replace",
   ) => void;
   onUploadDocuments: () => void;
+  /** Opens the full-page chunk settings (explicit reparse) for one document. */
+  onOpenChunkSettings: (document: KnowledgeDocumentItem) => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -349,6 +350,7 @@ export function KnowledgeDocumentsView({
       navState={navState}
       onNavigate={onNavigate}
       onUploadDocuments={onUploadDocuments}
+      onOpenChunkSettings={onOpenChunkSettings}
       onBrowse={(document) =>
         onNavigate({ ...navState, doc: document.id }, "push")
       }
@@ -365,6 +367,7 @@ function DocumentsTable({
   onNavigate,
   onBrowse,
   onUploadDocuments,
+  onOpenChunkSettings,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -377,8 +380,9 @@ function DocumentsTable({
   ) => void;
   onBrowse: (document: KnowledgeDocumentItem) => void;
   onUploadDocuments: () => void;
+  onOpenChunkSettings: (document: KnowledgeDocumentItem) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const labels = t.knowledge;
   const retryDocument = useRetryKnowledgeDocument(scope);
   const deleteDocument = useDeleteKnowledgeDocument(scope);
@@ -386,13 +390,12 @@ function DocumentsTable({
   const batchDelete = useDeleteKnowledgeDocuments(scope);
   const [deleting, setDeleting] = useState<KnowledgeDocumentItem | null>(null);
   const [renaming, setRenaming] = useState<KnowledgeDocumentItem | null>(null);
-  // Metadata and reparse dialogs track ids, not row objects: conflicts
-  // refresh the authoritative row and the dialogs must re-read the live
-  // version instead of a snapshot taken when they opened.
+  // The metadata dialog tracks an id, not a row object: conflicts refresh the
+  // authoritative row and the dialog must re-read the live version instead
+  // of a snapshot taken when it opened.
   const [editingMetadataId, setEditingMetadataId] = useState<string | null>(
     null,
   );
-  const [reparsingId, setReparsingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchMetadataOpen, setBatchMetadataOpen] = useState(false);
@@ -744,23 +747,25 @@ function DocumentsTable({
           {knowledgeErrorMessage(documents.error, labels.errors)}
         </p>
       ) : items.length === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
-          {labels.documents.empty}
-        </p>
+        <DocumentsEmptyState
+          icon={FileTextIcon}
+          message={labels.documents.empty}
+        />
       ) : derived.filteredTotal === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed px-4 py-10 text-center text-[13px]">
-          {labels.documents.filteredEmpty}
-        </p>
+        <DocumentsEmptyState
+          icon={SearchXIcon}
+          message={labels.documents.filteredEmpty}
+        />
       ) : (
         <div
-          className="border-border/80 bg-card overflow-x-auto rounded-xl border shadow-xs"
+          className="border-border/60 bg-card @container overflow-x-auto rounded-xl border"
           data-testid="knowledge-documents-table"
         >
           <table className="w-full min-w-[680px] table-fixed text-left text-[13px]">
-            <thead className="bg-muted/70 text-muted-foreground text-xs [&_th]:font-medium">
+            <thead className="border-border/60 text-muted-foreground border-b text-xs [&_th]:font-medium">
               <tr>
                 {canEdit ? (
-                  <th className="w-10 px-3 py-3">
+                  <th className="w-10 px-4 py-2.5">
                     <input
                       type="checkbox"
                       className="accent-selection size-4 align-middle"
@@ -776,40 +781,46 @@ function DocumentsTable({
                     />
                   </th>
                 ) : null}
-                <th className="px-3 py-3">{labels.documents.columns.name}</th>
-                <th className="w-36 px-3 py-3">
+                <th className="px-4 py-2.5">{labels.documents.columns.name}</th>
+                <th className="w-36 px-3 py-2.5 @4xl:w-[15%] @4xl:px-4">
                   {labels.documents.columns.status}
                 </th>
-                <th className="w-20 px-3 py-3">
+                <th className="w-18 px-3 py-2.5 @4xl:px-4">
                   {labels.documents.columns.enabled}
                 </th>
-                <th className="w-16 px-2 py-3">
+                <th className="hidden w-20 px-3 py-2.5 text-right @4xl:table-cell @4xl:w-[9%] @4xl:px-4">
                   {labels.documents.columns.size}
                 </th>
-                <th className="w-20 px-3 py-3">
+                <th className="w-20 px-3 py-2.5 text-right @4xl:w-[9%] @4xl:px-4">
                   {labels.documents.columns.segments}
                 </th>
-                <th className="w-24 px-3 py-3">
+                <th className="w-24 px-3 py-2.5 text-right @4xl:w-[10%] @4xl:px-4">
                   {labels.documents.columns.words}
                 </th>
-                <th className="bg-muted/95 sticky right-0 z-10 w-12 px-2 py-3 text-right shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
+                <th className="hidden w-28 px-3 py-2.5 text-right @3xl:table-cell @4xl:w-[12%] @4xl:px-4">
+                  {labels.documents.columns.uploadedAt}
+                </th>
+                <th className="w-12 px-2 py-2.5">
                   <span className="sr-only">
                     {labels.documents.columns.actions}
                   </span>
                 </th>
               </tr>
             </thead>
-            <tbody data-testid="knowledge-document-rows">
+            <tbody
+              className="divide-border/50 divide-y"
+              data-testid="knowledge-document-rows"
+            >
               {derived.rows.map((document) => (
                 <tr
                   key={document.id}
                   className={cn(
-                    "group border-border/60 hover:bg-muted/40 border-t align-top transition-colors",
+                    "group hover:bg-muted/30 align-top transition-colors",
                     selected.has(document.id) && "bg-selection-subtle/40",
                   )}
                 >
                   {canEdit ? (
-                    <td className="px-3 py-3">
+                    <td className="px-4 py-3">
                       <input
                         type="checkbox"
                         className="accent-selection size-4 align-middle"
@@ -824,22 +835,22 @@ function DocumentsTable({
                       />
                     </td>
                   ) : null}
-                  <td className="px-3 py-3">
-                    <div className="flex min-w-0 items-center gap-3">
+                  <td className="px-4 py-3">
+                    <div className="flex min-w-0 items-start gap-3">
                       <KnowledgeFileTypeIcon
                         fileName={document.original_name}
                       />
                       <div className="min-w-0 flex-1">
                         <span
                           title={document.name}
-                          className="text-foreground block truncate font-medium"
+                          className="text-foreground block truncate leading-5 font-medium"
                         >
                           {document.name}
                         </span>
                         {document.original_name !== document.name ? (
                           <span
                             title={document.original_name}
-                            className="text-muted-foreground block truncate text-xs"
+                            className="text-muted-foreground block truncate text-xs leading-4"
                           >
                             {document.original_name}
                           </span>
@@ -848,7 +859,7 @@ function DocumentsTable({
                       </div>
                     </div>
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-3 py-3 @4xl:px-4">
                     <Badge
                       variant={documentStatusVariant(document.status)}
                       className={documentStatusClassName(document.status)}
@@ -865,7 +876,7 @@ function DocumentsTable({
                       <DocumentErrorMessage message={document.delete_error} />
                     ) : null}
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-3 py-3 @4xl:px-4">
                     <Switch
                       className="data-[state=checked]:bg-success/80"
                       checked={document.enabled}
@@ -888,16 +899,29 @@ function DocumentsTable({
                       }
                     />
                   </td>
-                  <td className="text-muted-foreground px-2 py-3">
+                  <td className="hidden px-3 py-3 text-right leading-5 whitespace-nowrap tabular-nums @4xl:table-cell @4xl:px-4">
                     {formatSizeBytes(document.size_bytes)}
                   </td>
-                  <td className="text-muted-foreground px-3 py-3 tabular-nums">
-                    {document.segment_count}
+                  <td className="px-3 py-3 text-right tabular-nums @4xl:px-4">
+                    <span className="block leading-5">
+                      {document.segment_count.toLocaleString(locale)}
+                    </span>
+                    <span className="text-muted-foreground block text-xs leading-4">
+                      {document.chunking_mode === "parent_child"
+                        ? labels.documents.chunkingModeParentChild
+                        : labels.documents.chunkingModeGeneral}
+                    </span>
                   </td>
-                  <td className="text-muted-foreground px-3 py-3 tabular-nums">
-                    {document.word_count.toLocaleString()}
+                  <td className="px-3 py-3 text-right leading-5 tabular-nums @4xl:px-4">
+                    {document.word_count.toLocaleString(locale)}
                   </td>
-                  <td className="bg-background group-hover:bg-muted sticky right-0 z-10 px-2 py-2.5 shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">
+                  <td
+                    className="text-muted-foreground hidden px-3 py-3 text-right leading-5 whitespace-nowrap tabular-nums @3xl:table-cell @4xl:px-4"
+                    title={new Date(document.created_at).toLocaleString(locale)}
+                  >
+                    {new Date(document.created_at).toLocaleDateString(locale)}
+                  </td>
+                  <td className="px-2 py-2.5">
                     {document.status === "ready" ||
                     (document.status !== "uploading" &&
                       document.status !== "deleting") ||
@@ -998,10 +1022,13 @@ function DocumentsTable({
                               document.status === "failed") ? (
                               <DropdownMenuItem
                                 className="text-[13px]"
-                                onSelect={() => setReparsingId(document.id)}
+                                onSelect={() => onOpenChunkSettings(document)}
                               >
-                                <FileCog2Icon aria-hidden className="size-4" />
-                                {labels.documents.reparse}
+                                <SlidersHorizontalIcon
+                                  aria-hidden
+                                  className="size-4"
+                                />
+                                {labels.documents.chunkSettings}
                               </DropdownMenuItem>
                             ) : null}
                             {canEdit ? (
@@ -1027,7 +1054,7 @@ function DocumentsTable({
       )}
 
       {derived.filteredTotal > 0 ? (
-        <div className="text-muted-foreground flex items-center justify-between gap-2 text-xs">
+        <div className="text-muted-foreground flex min-h-8 items-center justify-between gap-2 text-xs">
           <span data-testid="knowledge-documents-page-info">
             {labels.documents.pageInfo(
               derived.page,
@@ -1035,30 +1062,32 @@ function DocumentsTable({
               derived.filteredTotal,
             )}
           </span>
-          <div className="flex items-center gap-1.5">
-            <Button
-              className="h-8 rounded-lg text-[13px] shadow-none"
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={derived.page <= 1}
-              onClick={() => setPage(derived.page - 1)}
-            >
-              <ChevronLeftIcon aria-hidden className="size-4" />
-              {labels.documents.previousPage}
-            </Button>
-            <Button
-              className="h-8 rounded-lg text-[13px] shadow-none"
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={derived.page >= derived.pageCount}
-              onClick={() => setPage(derived.page + 1)}
-            >
-              {labels.documents.nextPage}
-              <ChevronRightIcon aria-hidden className="size-4" />
-            </Button>
-          </div>
+          {derived.pageCount > 1 ? (
+            <div className="flex items-center gap-1.5">
+              <Button
+                className="h-8 rounded-lg text-[13px] shadow-none"
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={derived.page <= 1}
+                onClick={() => setPage(derived.page - 1)}
+              >
+                <ChevronLeftIcon aria-hidden className="size-4" />
+                {labels.documents.previousPage}
+              </Button>
+              <Button
+                className="h-8 rounded-lg text-[13px] shadow-none"
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={derived.page >= derived.pageCount}
+                onClick={() => setPage(derived.page + 1)}
+              >
+                {labels.documents.nextPage}
+                <ChevronRightIcon aria-hidden className="size-4" />
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -1086,15 +1115,6 @@ function DocumentsTable({
           base={base}
           documents={derived.rows.filter((row) => selected.has(row.id))}
           onClose={() => setBatchMetadataOpen(false)}
-        />
-      ) : null}
-
-      {reparsingId !== null ? (
-        <ReparseDocumentDialog
-          scope={scope}
-          base={base}
-          document={items.find((item) => item.id === reparsingId) ?? null}
-          onClose={() => setReparsingId(null)}
         />
       ) : null}
 
@@ -1746,401 +1766,6 @@ function BatchMetadataDialog({
               {setMetadata.isPending
                 ? labels.common.saving
                 : labels.common.save}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * Explicit re-parse of the stored original file. The dialog reads the live
- * document row: a version conflict refreshes the authoritative data and the
- * user re-confirms against the new version, keeping their unsaved parameters.
- */
-function ReparseDocumentDialog({
-  scope,
-  base,
-  document,
-  onClose,
-}: {
-  scope: ProjectClientScope;
-  base: KnowledgeBaseItem;
-  document: KnowledgeDocumentItem | null;
-  onClose: () => void;
-}) {
-  const { t } = useI18n();
-  const labels = t.knowledge;
-  const queryClient = useQueryClient();
-  const preview = usePreviewKnowledgeDocumentReparse(scope);
-  const reparse = useReparseKnowledgeDocument(scope);
-  const [chunkSize, setChunkSize] = useState(
-    String(document?.chunk_size ?? 1000),
-  );
-  const [chunkOverlap, setChunkOverlap] = useState(
-    String(document?.chunk_overlap ?? 100),
-  );
-  const [chunkSeparator, setChunkSeparator] = useState(
-    document?.chunk_separator ?? DEFAULT_CHUNK_SEPARATOR,
-  );
-  const [chunkingMode, setChunkingMode] = useState<KnowledgeChunkingMode>(
-    document?.chunking_mode ?? "general",
-  );
-  const [childChunkSize, setChildChunkSize] = useState(
-    String(document?.child_chunk_size ?? 500),
-  );
-  const [childChunkSeparator, setChildChunkSeparator] = useState(
-    document?.child_chunk_separator ?? DEFAULT_CHILD_CHUNK_SEPARATOR,
-  );
-  const [removeExtraSpaces, setRemoveExtraSpaces] = useState(
-    document?.remove_extra_spaces ?? false,
-  );
-  const [removeUrlsEmails, setRemoveUrlsEmails] = useState(
-    document?.remove_urls_emails ?? false,
-  );
-  // Sticky conflict notice: it must survive the authority refresh, which
-  // resets the mutation error it would otherwise derive from.
-  const [staleConflict, setStaleConflict] = useState(false);
-
-  // The row disappeared (deleted elsewhere): nothing to confirm against.
-  useEffect(() => {
-    if (document === null) onClose();
-  }, [document, onClose]);
-
-  // A parameter edit or a version change invalidates the preview on screen —
-  // it described a different reparse than the one now up for confirmation.
-  const resetPreview = preview.reset;
-  useEffect(() => {
-    resetPreview();
-  }, [
-    chunkSize,
-    chunkOverlap,
-    chunkSeparator,
-    chunkingMode,
-    childChunkSize,
-    childChunkSeparator,
-    removeExtraSpaces,
-    removeUrlsEmails,
-    document?.version,
-    resetPreview,
-  ]);
-
-  if (document === null) return null;
-
-  const parsedChunkSize = Number.parseInt(chunkSize, 10);
-  const parsedChunkOverlap = Number.parseInt(chunkOverlap, 10);
-  const parsedChildChunkSize = Number.parseInt(childChunkSize, 10);
-  const childParamsValid =
-    chunkingMode === "general" ||
-    (isChildChunkSizeValid(parsedChildChunkSize, parsedChunkSize) &&
-      isChunkSeparatorValid(childChunkSeparator));
-  const paramsValid =
-    isChunkSizeValid(parsedChunkSize) &&
-    isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize) &&
-    isChunkSeparatorValid(chunkSeparator) &&
-    childParamsValid;
-
-  const buildInput = (): KnowledgeReparseInput => ({
-    expected_version: document.version,
-    chunk_size: parsedChunkSize,
-    chunk_overlap: parsedChunkOverlap,
-    chunk_separator: chunkSeparator,
-    remove_extra_spaces: removeExtraSpaces,
-    remove_urls_emails: removeUrlsEmails,
-    chunking_mode: chunkingMode,
-    ...(chunkingMode === "parent_child"
-      ? {
-          child_chunk_size: parsedChildChunkSize,
-          child_chunk_separator: childChunkSeparator,
-        }
-      : {}),
-  });
-
-  const conflict =
-    isKnowledgeConflictError(reparse.error) ||
-    isKnowledgeConflictError(preview.error) ||
-    staleConflict;
-
-  // A version conflict means the attempt was based on a stale row: refresh
-  // the authority so the dialog re-reads the current version, and let the
-  // user re-confirm with their edits intact. The sticky flag keeps the
-  // notice visible after the refresh clears the mutation error behind it.
-  const refreshStaleAuthority = (error: unknown) => {
-    if (isKnowledgeConflictError(error)) {
-      setStaleConflict(true);
-      void queryClient.invalidateQueries({
-        queryKey: knowledgeQueryKey(scope, "documents", "list", base.id),
-      });
-    }
-  };
-
-  const submit = () => {
-    if (!paramsValid) return;
-    setStaleConflict(false);
-    reparse.mutate(
-      { documentId: document.id, baseId: base.id, input: buildInput() },
-      {
-        onSuccess: () => onClose(),
-        onError: refreshStaleAuthority,
-      },
-    );
-  };
-
-  const requestPreview = () => {
-    setStaleConflict(false);
-    preview.mutate(
-      { documentId: document.id, input: buildInput() },
-      { onError: refreshStaleAuthority },
-    );
-  };
-
-  const previewData: KnowledgeReparsePreviewResponse | null =
-    preview.data ?? null;
-
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent className="border-border/80 max-h-[85vh] overflow-y-auto rounded-xl text-[13px] sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle className="text-base font-semibold">
-            {labels.documents.reparseTitle(document.name)}
-          </DialogTitle>
-          <DialogDescription className="text-[13px] leading-5">
-            {labels.documents.reparseWarning}
-          </DialogDescription>
-        </DialogHeader>
-        {document.chunk_size_unit === "character" ? (
-          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-            {labels.documents.reparseLegacyUnitWarning}
-          </p>
-        ) : null}
-        <form
-          className="grid gap-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit();
-          }}
-        >
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.wizard.chunkSizeTokenLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={KNOWLEDGE_CHUNK_SIZE_MIN}
-                max={KNOWLEDGE_CHUNK_SIZE_MAX}
-                value={chunkSize}
-                aria-invalid={!isChunkSizeValid(parsedChunkSize) || undefined}
-                onChange={(event) => setChunkSize(event.target.value)}
-              />
-            </label>
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
-                {labels.wizard.chunkOverlapTokenLabel}
-              </span>
-              <Input
-                className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                type="number"
-                min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
-                max={KNOWLEDGE_CHUNK_OVERLAP_MAX}
-                value={chunkOverlap}
-                aria-invalid={
-                  !isChunkOverlapValid(parsedChunkOverlap, parsedChunkSize) ||
-                  undefined
-                }
-                onChange={(event) => setChunkOverlap(event.target.value)}
-              />
-            </label>
-          </div>
-          <label className="grid gap-1.5 text-[13px]">
-            <span className="font-medium">
-              {labels.documents.chunkSeparatorLabel}
-            </span>
-            <Input
-              className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-              value={chunkSeparator}
-              aria-invalid={!isChunkSeparatorValid(chunkSeparator) || undefined}
-              onChange={(event) => setChunkSeparator(event.target.value)}
-            />
-          </label>
-          <fieldset className="grid gap-2 text-[13px]">
-            <legend className="font-medium">
-              {labels.documents.chunkingModeLabel}
-            </legend>
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="reparse-chunking-mode"
-                className="accent-selection size-4"
-                checked={chunkingMode === "general"}
-                onChange={() => setChunkingMode("general")}
-              />
-              {labels.documents.chunkingModeGeneral}
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="reparse-chunking-mode"
-                className="accent-selection size-4"
-                checked={chunkingMode === "parent_child"}
-                onChange={() => setChunkingMode("parent_child")}
-              />
-              {labels.documents.chunkingModeParentChild}
-            </label>
-          </fieldset>
-          {chunkingMode === "parent_child" ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.wizard.childChunkSizeTokenLabel}
-                </span>
-                <Input
-                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  type="number"
-                  min={KNOWLEDGE_CHILD_CHUNK_SIZE_MIN}
-                  max={KNOWLEDGE_CHILD_CHUNK_SIZE_MAX}
-                  value={childChunkSize}
-                  aria-invalid={
-                    !isChildChunkSizeValid(
-                      parsedChildChunkSize,
-                      parsedChunkSize,
-                    ) || undefined
-                  }
-                  onChange={(event) => setChildChunkSize(event.target.value)}
-                />
-              </label>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.documents.childChunkSeparatorLabel}
-                </span>
-                <Input
-                  className="border-input/80 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  value={childChunkSeparator}
-                  aria-invalid={
-                    !isChunkSeparatorValid(childChunkSeparator) || undefined
-                  }
-                  onChange={(event) =>
-                    setChildChunkSeparator(event.target.value)
-                  }
-                />
-              </label>
-            </div>
-          ) : null}
-          <div className="grid gap-2 text-[13px]">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                className="accent-selection size-4"
-                checked={removeExtraSpaces}
-                onChange={(event) => setRemoveExtraSpaces(event.target.checked)}
-              />
-              {labels.documents.removeExtraSpacesLabel}
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                className="accent-selection size-4"
-                checked={removeUrlsEmails}
-                onChange={(event) => setRemoveUrlsEmails(event.target.checked)}
-              />
-              {labels.documents.removeUrlsEmailsLabel}
-            </label>
-          </div>
-
-          <div className="space-y-2">
-            <Button
-              className="h-8 rounded-lg text-[13px] shadow-none"
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={preview.isPending || !paramsValid}
-              onClick={requestPreview}
-            >
-              {preview.isPending
-                ? labels.wizard.previewLoading
-                : labels.documents.reparsePreviewButton}
-            </Button>
-            {preview.error && !conflict ? (
-              <p role="alert" className="text-destructive text-[13px]">
-                {knowledgeErrorMessage(preview.error, labels.errors)}
-              </p>
-            ) : null}
-            {previewData ? (
-              <div
-                className="border-border max-h-56 space-y-2 overflow-y-auto rounded-lg border p-3"
-                data-testid="knowledge-reparse-preview"
-              >
-                <p className="text-muted-foreground text-xs">
-                  {labels.documents.reparsePreviewShowing(
-                    previewData.items.length,
-                    previewData.total,
-                  )}
-                </p>
-                {previewData.omitted_preview_attachment_count > 0 ? (
-                  <p className="text-muted-foreground text-xs">
-                    {labels.documents.reparsePreviewAttachmentsOmitted(
-                      previewData.omitted_preview_attachment_count,
-                    )}
-                  </p>
-                ) : null}
-                {previewData.items.map((item) => (
-                  <div key={item.position} className="space-y-1">
-                    <p className="text-muted-foreground text-xs font-medium">
-                      {labels.wizard.previewChunkLabel(item.position)} ·{" "}
-                      {labels.wizard.previewCharacters(item.word_count)}
-                      {item.child_contents.length > 0
-                        ? ` · ${labels.wizard.previewChildCount(item.child_contents.length)}`
-                        : ""}
-                    </p>
-                    <p className="line-clamp-3 text-xs break-words whitespace-pre-wrap">
-                      {item.content}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          {conflict ? (
-            <p
-              role="alert"
-              className="text-destructive text-[13px]"
-              data-testid="knowledge-reparse-conflict"
-            >
-              {labels.documents.reparseConflict}
-            </p>
-          ) : null}
-          {reparse.error && !conflict ? (
-            <p role="alert" className="text-destructive text-[13px]">
-              {knowledgeErrorMessage(reparse.error, labels.errors)}
-            </p>
-          ) : null}
-
-          <DialogFooter>
-            <Button
-              className="h-9 rounded-lg text-[13px] shadow-none"
-              type="button"
-              variant="outline"
-              onClick={onClose}
-            >
-              {labels.common.cancel}
-            </Button>
-            <Button
-              className="h-9 rounded-lg text-[13px] shadow-none"
-              type="submit"
-              variant="destructive"
-              disabled={reparse.isPending || !paramsValid}
-            >
-              {reparse.isPending
-                ? labels.documents.reparsePending
-                : labels.documents.reparseSubmit}
             </Button>
           </DialogFooter>
         </form>

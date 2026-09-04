@@ -5,8 +5,6 @@ import {
   ArrowRightIcon,
   BookOpenIcon,
   CheckIcon,
-  LayersIcon,
-  WaypointsIcon,
   FolderPlusIcon,
   RefreshCwIcon,
   UploadCloudIcon,
@@ -28,7 +26,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import { isKnowledgeConflictError } from "@/core/knowledge/api";
-import { createPreviewImageURLs } from "@/core/knowledge/attachment-images";
 import {
   isChildChunkSizeValid,
   isChunkOverlapValid,
@@ -37,7 +34,6 @@ import {
   knowledgeFileExtension,
   normalizeKnowledgeHeaderRules,
   KNOWLEDGE_BASE_NAME_MAX_CHARS,
-  KNOWLEDGE_CHUNK_OVERLAP_MIN,
 } from "@/core/knowledge/chunk-settings";
 import {
   useCreateKnowledgeBase,
@@ -61,7 +57,6 @@ import {
   DEFAULT_CHILD_CHUNK_SEPARATOR,
   DEFAULT_CHUNK_SEPARATOR,
   type KnowledgeBaseItem,
-  type KnowledgeChunkPreviewResponse,
   type KnowledgeChunkingMode,
   type KnowledgeFileCapabilities,
   type KnowledgeHeaderRule,
@@ -71,6 +66,12 @@ import {
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeBaseConfigurationSummary } from "./knowledge-base-configuration-summary";
+import { KnowledgeChunkPreviewList } from "./knowledge-chunk-preview-list";
+import {
+  KnowledgeChunkSettingsFields,
+  type KnowledgeChunkSettingsDraft,
+} from "./knowledge-chunk-settings-fields";
 import {
   documentStatusClassName,
   documentStatusVariant,
@@ -78,8 +79,6 @@ import {
 import { knowledgeErrorMessage } from "./knowledge-error";
 import { KnowledgeFileTypeIcon } from "./knowledge-file-type-icon";
 import { KnowledgeHeaderSettings } from "./knowledge-header-settings";
-import type { KnowledgeImageSource } from "./knowledge-image";
-import { KnowledgeMarkdown } from "./knowledge-markdown";
 import { KnowledgeRetrievalModeField } from "./knowledge-retrieval-mode-field";
 
 type WizardStep = 1 | 2 | 3;
@@ -113,116 +112,6 @@ type KnowledgeSubmissionSnapshot = {
   removeExtraSpaces: boolean;
   removeUrlsEmails: boolean;
 };
-
-const EMPTY_KNOWLEDGE_IMAGE_SOURCES: ReadonlyMap<string, KnowledgeImageSource> =
-  new Map();
-
-function PreviewChunkList({
-  data,
-  scopeKey,
-  stale,
-  labels,
-}: {
-  data: KnowledgeChunkPreviewResponse;
-  scopeKey: string;
-  stale: boolean;
-  labels: ReturnType<typeof useI18n>["t"]["knowledge"]["wizard"];
-}) {
-  const resourceIdentity = `${scopeKey}:${data.preview_fingerprint}:${stale ? "stale" : "current"}`;
-  const [imageState, setImageState] = useState<{
-    identity: string;
-    sources: ReadonlyMap<string, KnowledgeImageSource>;
-  } | null>(null);
-
-  useEffect(() => {
-    if (stale) return;
-    let resources: ReturnType<typeof createPreviewImageURLs> | null = null;
-    try {
-      resources = createPreviewImageURLs(data.preview_attachments);
-      setImageState({
-        identity: resourceIdentity,
-        sources: new Map(
-          [...resources.urls].map(([ref, url]) => [
-            ref,
-            { kind: "preview", url } as const,
-          ]),
-        ),
-      });
-    } catch {
-      setImageState({
-        identity: resourceIdentity,
-        sources: EMPTY_KNOWLEDGE_IMAGE_SOURCES,
-      });
-    }
-    return () => resources?.dispose();
-  }, [data, resourceIdentity, stale]);
-
-  const imageSources =
-    imageState?.identity === resourceIdentity
-      ? imageState.sources
-      : EMPTY_KNOWLEDGE_IMAGE_SOURCES;
-
-  return (
-    <ul className={cn("grid gap-6 transition-opacity", stale && "opacity-60")}>
-      {data.items.map((chunk) => (
-        <li key={chunk.position} className="space-y-2">
-          <p className="text-muted-foreground flex items-center justify-between gap-2 text-xs tabular-nums">
-            <span className="font-medium">
-              {labels.previewChunkLabel(chunk.position)}
-            </span>
-            <span>
-              {chunk.child_contents.length > 0
-                ? `${labels.previewChildCount(chunk.child_contents.length)} · `
-                : null}
-              {labels.previewCharacters(chunk.word_count)}
-            </span>
-          </p>
-          {chunk.child_contents.length === 0 ? (
-            <KnowledgeMarkdown
-              content={chunk.content}
-              imageSources={imageSources}
-              scopeKey={scopeKey}
-              className="text-[13px] leading-6 break-words"
-            />
-          ) : null}
-          {chunk.child_contents.length > 0 ? (
-            <ol className="flex flex-wrap items-start gap-x-1 gap-y-1.5">
-              {chunk.child_contents.map((childContent, index) => (
-                <li
-                  key={index}
-                  className="bg-muted/60 max-w-full rounded-sm px-1.5 py-0.5 text-[13px] leading-6 break-words"
-                >
-                  <span className="text-muted-foreground mr-1.5 inline-block text-[10px] font-medium tabular-nums">
-                    {labels.previewChildLabel(index + 1)}
-                  </span>
-                  <KnowledgeMarkdown
-                    content={childContent}
-                    imageSources={imageSources}
-                    scopeKey={scopeKey}
-                    className="inline whitespace-normal"
-                  />
-                </li>
-              ))}
-            </ol>
-          ) : null}
-          {chunk.child_contents.length > 0 ? (
-            <details className="text-muted-foreground text-xs">
-              <summary className="hover:text-foreground cursor-pointer py-1">
-                {labels.previewParentText}
-              </summary>
-              <KnowledgeMarkdown
-                content={chunk.content}
-                imageSources={imageSources}
-                scopeKey={scopeKey}
-                className="pt-1 text-[13px] leading-6 break-words"
-              />
-            </details>
-          ) : null}
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 function fileBaseName(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
@@ -351,17 +240,26 @@ export function KnowledgeCreateWizard({
   const [retrievalMode, setRetrievalMode] = useState<KnowledgeRetrievalMode>(
     existingBase?.retrieval_mode ?? "semantic",
   );
-  const [chunkSize, setChunkSize] = useState("1000");
-  const [chunkOverlap, setChunkOverlap] = useState("100");
-  const [chunkSeparator, setChunkSeparator] = useState(DEFAULT_CHUNK_SEPARATOR);
-  const [chunkingMode, setChunkingMode] =
-    useState<KnowledgeChunkingMode>("general");
-  const [childChunkSize, setChildChunkSize] = useState("500");
-  const [childChunkSeparator, setChildChunkSeparator] = useState(
-    DEFAULT_CHILD_CHUNK_SEPARATOR,
-  );
-  const [removeExtraSpaces, setRemoveExtraSpaces] = useState(false);
-  const [removeUrlsEmails, setRemoveUrlsEmails] = useState(false);
+  const [chunkDraft, setChunkDraft] = useState<KnowledgeChunkSettingsDraft>({
+    chunkSize: "1000",
+    chunkOverlap: "100",
+    chunkSeparator: DEFAULT_CHUNK_SEPARATOR,
+    chunkingMode: "general",
+    childChunkSize: "500",
+    childChunkSeparator: DEFAULT_CHILD_CHUNK_SEPARATOR,
+    removeExtraSpaces: false,
+    removeUrlsEmails: false,
+  });
+  const {
+    chunkSize,
+    chunkOverlap,
+    chunkSeparator,
+    chunkingMode,
+    childChunkSize,
+    childChunkSeparator,
+    removeExtraSpaces,
+    removeUrlsEmails,
+  } = chunkDraft;
   const [createdBase, setCreatedBase] = useState<KnowledgeBaseItem | null>(
     null,
   );
@@ -1093,244 +991,19 @@ export function KnowledgeCreateWizard({
                     {wizard.knowledgeTokenUnit}
                   </p>
                 </div>
-                <fieldset className="grid gap-2.5">
-                  <legend className="sr-only">
-                    {labels.documents.chunkingModeLabel}
-                  </legend>
-                  {(
-                    [
-                      [
-                        "general",
-                        labels.documents.chunkingModeGeneral,
-                        labels.documents.chunkingModeGeneralHint,
-                      ],
-                      [
-                        "parent_child",
-                        labels.documents.chunkingModeParentChild,
-                        labels.documents.chunkingModeParentChildHint,
-                      ],
-                    ] as const
-                  ).map(([mode, label, hint]) => (
-                    <div
-                      key={mode}
-                      className={cn(
-                        "overflow-hidden rounded-xl border transition-colors",
-                        chunkingMode === mode
-                          ? "border-blue-600"
-                          : "border-border/70",
-                      )}
-                    >
-                      <label className="bg-muted/35 flex min-h-16 cursor-pointer items-start gap-3 p-3">
-                        <span
-                          aria-hidden
-                          className="border-border/50 bg-background flex size-8 shrink-0 items-center justify-center rounded-lg border shadow-xs"
-                        >
-                          {mode === "general" ? (
-                            <LayersIcon className="size-4 text-blue-600" />
-                          ) : (
-                            <WaypointsIcon className="size-4 text-sky-500" />
-                          )}
-                        </span>
-                        <span className="min-w-0 flex-1 space-y-0.5">
-                          <span className="block text-[13px] font-semibold">
-                            {label}
-                          </span>
-                          <span className="text-muted-foreground block text-xs leading-5">
-                            {hint}
-                          </span>
-                        </span>
-                        <input
-                          type="radio"
-                          name="chunking-mode"
-                          value={mode}
-                          className="mt-1 size-4 shrink-0 accent-blue-600"
-                          checked={chunkingMode === mode}
-                          disabled={isSubmitting}
-                          onChange={() => setChunkingMode(mode)}
-                        />
-                      </label>
-                      {chunkingMode === mode ? (
-                        <div className="bg-background space-y-4 p-4">
-                          {mode === "parent_child" ? (
-                            <h3 className="text-xs font-semibold">
-                              {wizard.parentContextTitle}
-                            </h3>
-                          ) : null}
-                          <div className="grid items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            <label className="grid gap-1.5 text-[13px]">
-                              <span className="font-medium">
-                                {labels.documents.chunkSeparatorLabel}
-                              </span>
-                              <Input
-                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                                required
-                                maxLength={64}
-                                disabled={isSubmitting}
-                                value={chunkSeparator}
-                                onChange={(event) =>
-                                  setChunkSeparator(event.target.value)
-                                }
-                              />
-                            </label>
-                            <label className="grid gap-1.5 text-[13px]">
-                              <span className="font-medium">
-                                {wizard.chunkSizeTokenLabel}
-                              </span>
-                              <Input
-                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                                type="number"
-                                min={chunkLimits?.parent_min}
-                                max={chunkLimits?.parent_max}
-                                required
-                                disabled={isSubmitting}
-                                value={chunkSize}
-                                onChange={(event) =>
-                                  setChunkSize(event.target.value)
-                                }
-                              />
-                            </label>
-                            <label className="grid gap-1.5 text-[13px]">
-                              <span className="font-medium">
-                                {wizard.chunkOverlapTokenLabel}
-                              </span>
-                              <Input
-                                className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                                type="number"
-                                min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
-                                max={chunkLimits?.overlap_max}
-                                required
-                                disabled={isSubmitting}
-                                value={chunkOverlap}
-                                onChange={(event) =>
-                                  setChunkOverlap(event.target.value)
-                                }
-                              />
-                            </label>
-                          </div>
-                          {chunkingMode === "parent_child" ? (
-                            <div className="space-y-2">
-                              <h3 className="text-xs font-semibold">
-                                {wizard.childRetrievalTitle}
-                              </h3>
-                              <div className="grid grid-cols-2 items-start gap-3">
-                                <label className="grid gap-1.5 text-[13px]">
-                                  <span className="font-medium">
-                                    {wizard.childChunkSizeTokenLabel}
-                                  </span>
-                                  <Input
-                                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                                    type="number"
-                                    min={chunkLimits?.child_min}
-                                    max={chunkLimits?.child_max}
-                                    required
-                                    disabled={isSubmitting}
-                                    value={childChunkSize}
-                                    onChange={(event) =>
-                                      setChildChunkSize(event.target.value)
-                                    }
-                                  />
-                                </label>
-                                <label className="grid gap-1.5 text-[13px]">
-                                  <span className="font-medium">
-                                    {labels.documents.childChunkSeparatorLabel}
-                                  </span>
-                                  <Input
-                                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
-                                    required
-                                    maxLength={64}
-                                    disabled={isSubmitting}
-                                    value={childChunkSeparator}
-                                    onChange={(event) =>
-                                      setChildChunkSeparator(event.target.value)
-                                    }
-                                  />
-                                </label>
-                              </div>
-                            </div>
-                          ) : null}
-                          <fieldset className="border-border/60 grid gap-2 border-t pt-3 text-[13px]">
-                            <legend className="bg-background pr-2 text-xs font-semibold">
-                              {labels.documents.preprocessingLabel}
-                            </legend>
-                            <label className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                className="size-4 accent-blue-600"
-                                checked={removeExtraSpaces}
-                                disabled={isSubmitting}
-                                onChange={(event) =>
-                                  setRemoveExtraSpaces(event.target.checked)
-                                }
-                              />
-                              {labels.documents.removeExtraSpacesLabel}
-                            </label>
-                            <label className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                className="size-4 accent-blue-600"
-                                checked={removeUrlsEmails}
-                                disabled={isSubmitting}
-                                onChange={(event) =>
-                                  setRemoveUrlsEmails(event.target.checked)
-                                }
-                              />
-                              {labels.documents.removeUrlsEmailsLabel}
-                            </label>
-                          </fieldset>
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </fieldset>
+                <KnowledgeChunkSettingsFields
+                  value={chunkDraft}
+                  onChange={setChunkDraft}
+                  disabled={isSubmitting}
+                  limits={chunkLimits}
+                  radioName="chunking-mode"
+                />
               </div>
               {modelsLocked ? (
-                <section className="border-border/60 space-y-3 border-t pt-5">
-                  <p className="text-muted-foreground text-xs leading-5">
-                    {wizard.existingConfigurationHint}
-                  </p>
-                  <dl className="grid gap-3 text-[13px]">
-                    <div className="grid min-w-0 gap-1.5">
-                      <dt className="font-medium">{labels.bases.modelLabel}</dt>
-                      <dd
-                        className="bg-muted/60 truncate rounded-lg px-3 py-2"
-                        title={modelDisplayName}
-                      >
-                        {modelDisplayName}
-                      </dd>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="grid min-w-0 gap-1.5">
-                        <dt className="font-medium">
-                          {labels.bases.retrievalModeLabel}
-                        </dt>
-                        <dd className="bg-muted/60 rounded-lg px-3 py-2">
-                          {
-                            labels.bases.retrievalModes[
-                              submissionSnapshot?.retrievalMode ??
-                                effectiveRetrievalMode
-                            ]
-                          }
-                        </dd>
-                      </div>
-                      <div className="grid min-w-0 gap-1.5">
-                        <dt className="font-medium">
-                          {labels.bases.rerankerLabel}
-                        </dt>
-                        <dd
-                          className="bg-muted/60 truncate rounded-lg px-3 py-2"
-                          title={rerankerDisplayName}
-                        >
-                          {rerankerDisplayName}
-                        </dd>
-                      </div>
-                    </div>
-                  </dl>
-                  {options.error ? (
-                    <p role="alert" className="text-destructive text-xs">
-                      {labels.bases.modelsLoadFailed}
-                    </p>
-                  ) : null}
-                </section>
+                <KnowledgeBaseConfigurationSummary
+                  scope={scope}
+                  base={existingBase}
+                />
               ) : (
                 <>
                   <div className="border-border/60 space-y-3 border-t pt-5">
@@ -1359,7 +1032,7 @@ export function KnowledgeCreateWizard({
                         onValueChange={setEmbeddingModelId}
                       >
                         <SelectTrigger
-                          className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15"
+                          className="bg-background border-input/80 w-full rounded-lg text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15"
                           aria-label={labels.bases.modelLabel}
                         >
                           <SelectValue
@@ -1417,7 +1090,7 @@ export function KnowledgeCreateWizard({
                               }
                             >
                               <SelectTrigger
-                                className="bg-muted/60 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-blue-500/15"
+                                className="bg-background border-input/80 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-blue-500/15"
                                 aria-label={labels.bases.rerankerLabel}
                               >
                                 <SelectValue />
@@ -1450,7 +1123,7 @@ export function KnowledgeCreateWizard({
                       {labels.bases.nameLabel}
                     </span>
                     <Input
-                      className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                      className="bg-background border-input/80 h-9 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                       value={name}
                       required
                       maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
@@ -1467,7 +1140,7 @@ export function KnowledgeCreateWizard({
                       {labels.bases.descriptionLabel}
                     </span>
                     <Textarea
-                      className="bg-muted/60 w-full rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                      className="bg-background border-input/80 w-full rounded-lg text-[13px] leading-5 shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                       value={description}
                       rows={2}
                       disabled={isSubmitting}
@@ -1482,7 +1155,7 @@ export function KnowledgeCreateWizard({
                     {labels.documents.displayNameLabel}
                   </span>
                   <Input
-                    className="bg-muted/60 h-9 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
+                    className="bg-background border-input/80 h-9 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]"
                     value={displayName}
                     maxLength={200}
                     disabled={isSubmitting}
@@ -1653,11 +1326,10 @@ export function KnowledgeCreateWizard({
                 </p>
               ) : null}
               {visiblePreviewData ? (
-                <PreviewChunkList
+                <KnowledgeChunkPreviewList
                   data={visiblePreviewData}
                   scopeKey={previewScopeKey}
                   stale={previewIsStale}
-                  labels={wizard}
                 />
               ) : null}
             </div>

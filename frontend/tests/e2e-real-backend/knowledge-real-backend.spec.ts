@@ -1029,15 +1029,17 @@ test("parent-child upload rolls child hits up to one parent citation and base de
 
   // Saving a stricter base default caps the next defaults-driven search.
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByLabel("Default results (top_k)").fill("1");
+  await page
+    .getByRole("region", { name: "Settings", exact: true })
+    .getByLabel("Top K")
+    .fill("1");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
 
   await page.getByRole("button", { name: "Retrieval test" }).click();
-  await expect(page.getByLabel("Results (top_k)")).toHaveAttribute(
-    "placeholder",
-    "1",
-  );
+  await expect(
+    page.getByRole("region", { name: "Retrieval test" }).getByLabel("Top K"),
+  ).toHaveAttribute("placeholder", "1");
   await page.getByLabel("Query").fill("如何联系应急值班团队");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(
@@ -1398,24 +1400,25 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
       .first(),
   ).toBeVisible({ timeout: 30_000 });
 
-  // Reparse re-splits the stored original file: the dialog previews the split
-  // with the edited parameters before anything is committed.
+  // Reparse re-splits the stored original file: the chunk settings page
+  // previews the split with the edited parameters before anything is
+  // committed.
   await nav.getByRole("button", { name: "Documents", exact: true }).click();
   await (await openDocumentActions(page, "rebuild.txt"))
-    .getByRole("menuitem", { name: "Reparse from original" })
+    .getByRole("menuitem", { name: "Chunk settings" })
     .click();
-  const reparseDialog = page.getByRole("dialog");
-  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await reparseDialog
-    .getByRole("button", { name: "Preview split", exact: true })
+  const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
+  await chunkSettings
+    .getByRole("button", { name: "Refresh preview", exact: true })
     .click();
   await expect(
-    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 30_000 });
-  await reparseDialog
+  await chunkSettings
     .getByRole("button", { name: "Reparse", exact: true })
     .click();
-  await expect(reparseDialog).toBeHidden();
+  await expect(chunkSettings).toBeHidden();
   await expect(rows.getByText("Ready")).toBeVisible({ timeout: 60_000 });
 
   // Replacement check: brand-new rows from the original file. The manual edit
@@ -1707,20 +1710,20 @@ test("summary indexing retries without hiding ready content, caches queries, and
   const reembeddedDocument = await readDocument();
   await nav.getByRole("button", { name: "Documents", exact: true }).click();
   await (await openDocumentActions(page, "summary.txt"))
-    .getByRole("menuitem", { name: "Reparse from original" })
+    .getByRole("menuitem", { name: "Chunk settings" })
     .click();
-  const reparseDialog = page.getByRole("dialog");
-  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await reparseDialog
-    .getByRole("button", { name: "Preview split", exact: true })
+  const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
+  await chunkSettings
+    .getByRole("button", { name: "Refresh preview", exact: true })
     .click();
   await expect(
-    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 30_000 });
-  await reparseDialog
+  await chunkSettings
     .getByRole("button", { name: "Reparse", exact: true })
     .click();
-  await expect(reparseDialog).toBeHidden();
+  await expect(chunkSettings).toBeHidden();
   await expect
     .poll(
       async () => {
@@ -2006,20 +2009,20 @@ test("the P1 image fixture keeps preview ephemeral, pins image reads, reprocesse
   const oldManagementPath = `${apiRoot}/documents/${document.id}/segments/${oldCitationDetail!.segment.id}/attachments/${oldAttachment.attachment_id}?${oldQuery}`;
 
   await (await openDocumentActions(page, "document-with-image.docx"))
-    .getByRole("menuitem", { name: "Reparse from original" })
+    .getByRole("menuitem", { name: "Chunk settings" })
     .click();
-  const reparseDialog = page.getByRole("dialog");
-  await reparseDialog.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await reparseDialog
-    .getByRole("button", { name: "Preview split", exact: true })
+  const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
+  await chunkSettings
+    .getByRole("button", { name: "Refresh preview", exact: true })
     .click();
   await expect(
-    reparseDialog.getByText(/Showing \d+ of \d+ chunks/u),
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 45_000 });
-  await reparseDialog
+  await chunkSettings
     .getByRole("button", { name: "Reparse", exact: true })
     .click();
-  await expect(reparseDialog).toBeHidden();
+  await expect(chunkSettings).toBeHidden();
   await expect
     .poll(
       async () => {

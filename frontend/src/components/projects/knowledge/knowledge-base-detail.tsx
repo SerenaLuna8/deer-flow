@@ -49,6 +49,7 @@ import {
 } from "@/core/knowledge/navigation";
 import type {
   KnowledgeBaseItem,
+  KnowledgeDocumentItem,
   KnowledgeMetadataFieldItem,
   KnowledgeMetadataFieldType,
   KnowledgeRetrievalMode,
@@ -80,6 +81,7 @@ export function KnowledgeBaseDetail({
   navState,
   onNavigate,
   onUploadDocuments,
+  onOpenChunkSettings,
 }: {
   scope: ProjectClientScope;
   base: KnowledgeBaseItem;
@@ -90,6 +92,7 @@ export function KnowledgeBaseDetail({
     mode: "push" | "replace",
   ) => void;
   onUploadDocuments: () => void;
+  onOpenChunkSettings: (document: KnowledgeDocumentItem) => void;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
@@ -137,7 +140,7 @@ export function KnowledgeBaseDetail({
 
   return (
     <div className="flex flex-col gap-6 lg:flex-row lg:gap-8">
-      <aside className="shrink-0 space-y-4 lg:w-60">
+      <aside className="shrink-0 space-y-4 lg:sticky lg:top-6 lg:max-h-[calc(100dvh-3rem)] lg:w-60 lg:self-start lg:overflow-y-auto">
         <Button
           type="button"
           variant="ghost"
@@ -214,6 +217,7 @@ export function KnowledgeBaseDetail({
             navState={navState}
             onNavigate={onNavigate}
             onUploadDocuments={onUploadDocuments}
+            onOpenChunkSettings={onOpenChunkSettings}
           />
         ) : null}
         {section === "search" && base.embedding_model_id === null ? (
@@ -323,7 +327,7 @@ function KnowledgeBaseSettingsPanel({
       </header>
       <form
         id={settingsFormId}
-        className="grid gap-5 pb-6"
+        className="grid gap-5"
         onSubmit={(event) => {
           event.preventDefault();
           if (!formValid) return;
@@ -355,7 +359,7 @@ function KnowledgeBaseSettingsPanel({
               <BookOpenIcon aria-hidden className="size-4.5" />
             </span>
             <Input
-              className="bg-muted h-9 w-full min-w-0 flex-1 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+              className="bg-background border-input/80 h-9 w-full min-w-0 flex-1 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
               value={name}
               required
               maxLength={KNOWLEDGE_BASE_NAME_MAX_CHARS}
@@ -371,7 +375,7 @@ function KnowledgeBaseSettingsPanel({
             {labels.bases.descriptionLabel}
           </span>
           <Textarea
-            className="bg-muted min-h-20 w-full max-w-[820px] min-w-0 rounded-lg border-transparent text-[13px] leading-5 shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+            className="bg-background border-input/80 min-h-20 w-full max-w-[820px] min-w-0 rounded-lg text-[13px] leading-5 shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
             value={description}
             rows={2}
             onChange={(event) => {
@@ -393,7 +397,7 @@ function KnowledgeBaseSettingsPanel({
               }}
             >
               <SelectTrigger
-                className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                className="bg-background border-input/80 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
                 aria-label={labels.bases.statusLabel}
               >
                 <SelectValue />
@@ -418,7 +422,7 @@ function KnowledgeBaseSettingsPanel({
       </form>
 
       {base.embedding_model_id === null ? (
-        <section className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+        <section className="grid gap-3 pt-8 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
           <h3 className="text-[13px] font-medium">
             {labels.bases.rebuildSectionTitle}
           </h3>
@@ -454,16 +458,11 @@ function KnowledgeBaseSettingsPanel({
       {base.embedding_model_id !== null ? (
         <section
           aria-label={labels.bases.retrievalSectionTitle}
-          className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
+          className="grid gap-3 pt-8 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
         >
-          <div className="space-y-1.5 sm:pt-2">
-            <h3 className="font-medium">
-              {labels.bases.retrievalSectionTitle}
-            </h3>
-            <p className="text-muted-foreground text-xs leading-5">
-              {labels.bases.retrievalModeHint}
-            </p>
-          </div>
+          <h3 className="font-medium sm:pt-2">
+            {labels.bases.retrievalSectionTitle}
+          </h3>
           <div className="w-full max-w-[820px] min-w-0 space-y-4">
             <KnowledgeRetrievalModeField
               variant="cards"
@@ -475,6 +474,102 @@ function KnowledgeBaseSettingsPanel({
                 setRetrievalMode(value);
               }}
               disabled={updateBase.isPending}
+              selectedContent={
+                <div className="space-y-4">
+                  <div className="grid gap-1.5">
+                    <span className="font-medium">
+                      {labels.bases.rerankerLabel}
+                    </span>
+                    {modelOptions.isLoading ? (
+                      <Skeleton className="h-9 rounded-lg" />
+                    ) : modelOptions.error ? (
+                      <p role="alert" className="text-destructive text-[13px]">
+                        {labels.bases.modelsLoadFailed}
+                      </p>
+                    ) : (
+                      <Select
+                        value={rerankerModelId}
+                        onValueChange={(value) => {
+                          touch();
+                          setRerankerModelId(value);
+                        }}
+                      >
+                        <SelectTrigger
+                          className="bg-background border-input/80 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                          aria-label={labels.bases.rerankerLabel}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="rounded-lg">
+                          <SelectItem
+                            className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                            value={RERANKER_NONE}
+                          >
+                            {labels.bases.rerankerNone}
+                          </SelectItem>
+                          {modelOptions.data?.reranker_models.map((option) => (
+                            <SelectItem
+                              className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
+                              key={option.id}
+                              value={option.id}
+                            >
+                              {option.provider_name} · {option.model_name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <span className="text-muted-foreground text-xs leading-5">
+                      {labels.bases.rerankerHint}
+                    </span>
+                  </div>
+                  <div className="grid items-start gap-4 md:grid-cols-2">
+                    <label className="grid gap-1.5">
+                      <span className="font-medium">
+                        {labels.bases.defaultTopKLabel}
+                      </span>
+                      <Input
+                        form={settingsFormId}
+                        className="bg-background border-input/80 h-9 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+                        type="number"
+                        min={1}
+                        max={20}
+                        required
+                        value={defaultTopK}
+                        onChange={(event) => {
+                          touch();
+                          setDefaultTopK(event.target.value);
+                        }}
+                      />
+                      <span className="text-muted-foreground text-xs leading-5">
+                        {labels.bases.defaultTopKHint}
+                      </span>
+                    </label>
+                    <label className="grid gap-1.5">
+                      <span className="font-medium">
+                        {labels.bases.defaultThresholdLabel}
+                      </span>
+                      <Input
+                        form={settingsFormId}
+                        className="bg-background border-input/80 h-9 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        required
+                        value={defaultThreshold}
+                        onChange={(event) => {
+                          touch();
+                          setDefaultThreshold(event.target.value);
+                        }}
+                      />
+                      <span className="text-muted-foreground text-xs leading-5">
+                        {labels.bases.defaultThresholdHint}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              }
             />
             <div className="border-border/70 flex items-start justify-between gap-4 rounded-xl border p-4">
               <div className="space-y-1.5">
@@ -510,105 +605,11 @@ function KnowledgeBaseSettingsPanel({
                 }}
               />
             </div>
-            <div className="border-border/70 space-y-4 rounded-xl border p-4">
-              <div className="grid gap-1.5">
-                <span className="font-medium">
-                  {labels.bases.rerankerLabel}
-                </span>
-                {modelOptions.isLoading ? (
-                  <Skeleton className="h-9 rounded-lg" />
-                ) : modelOptions.error ? (
-                  <p role="alert" className="text-destructive text-[13px]">
-                    {labels.bases.modelsLoadFailed}
-                  </p>
-                ) : (
-                  <Select
-                    value={rerankerModelId}
-                    onValueChange={(value) => {
-                      touch();
-                      setRerankerModelId(value);
-                    }}
-                  >
-                    <SelectTrigger
-                      className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
-                      aria-label={labels.bases.rerankerLabel}
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="rounded-lg">
-                      <SelectItem
-                        className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
-                        value={RERANKER_NONE}
-                      >
-                        {labels.bases.rerankerNone}
-                      </SelectItem>
-                      {modelOptions.data?.reranker_models.map((option) => (
-                        <SelectItem
-                          className="text-[13px] focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-blue-950/30 dark:focus:text-blue-300"
-                          key={option.id}
-                          value={option.id}
-                        >
-                          {option.provider_name} · {option.model_name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                <span className="text-muted-foreground text-xs leading-5">
-                  {labels.bases.rerankerHint}
-                </span>
-              </div>
-              <div className="grid items-start gap-4 md:grid-cols-2">
-                <label className="grid gap-1.5">
-                  <span className="font-medium">
-                    {labels.bases.defaultTopKLabel}
-                  </span>
-                  <Input
-                    form={settingsFormId}
-                    className="bg-muted h-9 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
-                    type="number"
-                    min={1}
-                    max={20}
-                    required
-                    value={defaultTopK}
-                    onChange={(event) => {
-                      touch();
-                      setDefaultTopK(event.target.value);
-                    }}
-                  />
-                  <span className="text-muted-foreground text-xs leading-5">
-                    {labels.bases.defaultTopKHint}
-                  </span>
-                </label>
-                <label className="grid gap-1.5">
-                  <span className="font-medium">
-                    {labels.bases.defaultThresholdLabel}
-                  </span>
-                  <Input
-                    form={settingsFormId}
-                    className="bg-muted h-9 w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15 md:text-[13px]"
-                    type="number"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    required
-                    value={defaultThreshold}
-                    onChange={(event) => {
-                      touch();
-                      setDefaultThreshold(event.target.value);
-                    }}
-                  />
-                  <span className="text-muted-foreground text-xs leading-5">
-                    {labels.bases.defaultThresholdHint}
-                  </span>
-                </label>
-              </div>
-            </div>
           </div>
         </section>
       ) : null}
 
-      <div className="border-border/60 grid gap-3 border-t pt-5 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
+      <div className="grid gap-3 pt-8 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6">
         <div className="w-full max-w-[820px] space-y-3 sm:col-start-2">
           {updateBase.error ? (
             <p role="alert" className="text-destructive text-[13px]">
@@ -671,7 +672,7 @@ function KnowledgeRebuildSection({
   return (
     <section
       aria-label={labels.bases.rebuildSectionTitle}
-      className="border-border/60 grid gap-3 border-t py-6 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
+      className="grid gap-3 pt-8 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
     >
       <div className="space-y-1.5 sm:pt-2.5">
         <h3 className="text-[13px] font-medium">
@@ -689,7 +690,7 @@ function KnowledgeRebuildSection({
               }}
             >
               <SelectTrigger
-                className="bg-muted w-full min-w-0 rounded-lg border-transparent text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
+                className="bg-background border-input/80 w-full min-w-0 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500/50 focus-visible:ring-blue-500/15"
                 aria-label={labels.bases.rebuildModelLabel}
               >
                 <SelectValue placeholder={labels.bases.modelPlaceholder} />
@@ -719,9 +720,6 @@ function KnowledgeRebuildSection({
               : labels.bases.rebuildButton}
           </Button>
         </div>
-        <p className="text-muted-foreground text-xs leading-5">
-          {labels.bases.rebuildHint}
-        </p>
         {rebuild.error ? (
           <p role="alert" className="text-destructive text-[13px]">
             {knowledgeErrorMessage(rebuild.error, labels.errors)}

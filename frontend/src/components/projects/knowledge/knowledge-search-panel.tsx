@@ -6,10 +6,9 @@ import {
   InfoIcon,
   PlusIcon,
   SearchIcon,
-  SlidersHorizontalIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import { isKnowledgeConflictError } from "@/core/knowledge/api";
 import {
@@ -113,6 +113,7 @@ export function KnowledgeSearchPanel({
   const scopeKey = `${scope.accountId}:${scope.projectId}`;
   const search = useKnowledgeSearch(scope);
   const metadataFields = useKnowledgeMetadataFields(scope, base.id);
+  const queryTitleId = useId();
   const [query, setQuery] = useState("");
   // Empty inputs defer to the base defaults resolved server-side.
   const [topK, setTopK] = useState("");
@@ -193,7 +194,10 @@ export function KnowledgeSearchPanel({
   };
 
   return (
-    <section aria-label={labels.search.title} className="space-y-5 text-[13px]">
+    <section
+      aria-label={labels.search.title}
+      className="@container space-y-5 text-[13px]"
+    >
       <div>
         <h2 className="text-base font-semibold tracking-tight">
           {labels.search.title}
@@ -202,9 +206,12 @@ export function KnowledgeSearchPanel({
           {labels.search.workspaceHint}
         </p>
       </div>
-      <div className="border-border/80 bg-background grid overflow-hidden rounded-xl border xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[360px_minmax(0,1fr)]">
+      {/* Stacked: query, results, recent queries. Two columns: the query
+          card and recent queries share the left column; results fill the
+          right column across both rows. */}
+      <div className="grid items-start gap-5 @4xl:grid-cols-[minmax(0,4fr)_minmax(0,5fr)] @4xl:grid-rows-[auto_1fr]">
         <form
-          className="border-border/70 flex min-w-0 flex-col gap-5 border-b p-5 xl:border-r xl:border-b-0"
+          className="border-border/80 bg-background @container/query min-w-0 overflow-hidden rounded-xl border transition-[border-color,box-shadow] focus-within:border-blue-500/60 focus-within:ring-2 focus-within:ring-blue-500/15 @4xl:col-start-1 @4xl:row-start-1"
           onSubmit={(event) => {
             event.preventDefault();
             if (!query.trim() || !topKValid || !thresholdValid || !filtersValid)
@@ -233,62 +240,19 @@ export function KnowledgeSearchPanel({
             search.mutate(input);
           }}
         >
-          <label className="grid gap-2 text-[13px]">
-            <span className="flex items-center gap-2 font-semibold">
+          <div className="border-border/60 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b px-5 py-3">
+            <span
+              id={queryTitleId}
+              className="flex items-center gap-2 font-semibold"
+            >
               <SearchIcon
                 aria-hidden
                 className="text-muted-foreground size-4"
               />
               {labels.search.queryLabel}
             </span>
-            <Input
-              className="border-input/80 bg-background h-10 rounded-lg text-[13px] shadow-none md:text-[13px]"
-              value={query}
-              required
-              maxLength={2000}
-              placeholder={labels.search.queryPlaceholder}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          <div className="border-border/60 space-y-4 border-t pt-4">
-            <h3 className="flex items-center gap-2 text-[13px] font-semibold">
-              <SlidersHorizontalIcon
-                aria-hidden
-                className="text-muted-foreground size-4"
-              />
-              {labels.search.parametersTitle}
-            </h3>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">{labels.search.topKLabel}</span>
-                <Input
-                  className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={topK}
-                  placeholder={String(base.default_top_k)}
-                  onChange={(event) => setTopK(event.target.value)}
-                />
-              </label>
-              <label className="grid gap-1.5 text-[13px]">
-                <span className="font-medium">
-                  {labels.search.thresholdLabel}
-                </span>
-                <Input
-                  className="border-border/70 bg-background h-9 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                  type="number"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={threshold}
-                  placeholder={String(base.default_score_threshold)}
-                  onChange={(event) => setThreshold(event.target.value)}
-                />
-              </label>
-            </div>
-            <label className="grid gap-1.5 text-[13px]">
-              <span className="font-medium">
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground text-xs">
                 {labels.search.retrievalModeLabel}
               </span>
               <Select
@@ -298,12 +262,15 @@ export function KnowledgeSearchPanel({
                 }
               >
                 <SelectTrigger
-                  className="border-input/80 bg-background w-full rounded-lg text-[13px] shadow-none"
+                  className="border-border/70 bg-background h-7 w-auto gap-1.5 rounded-md px-2.5 text-xs shadow-none"
                   aria-label={labels.search.retrievalModeLabel}
                 >
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                <SelectContent
+                  align="end"
+                  className="rounded-lg [&_[data-slot=select-item]]:text-[13px]"
+                >
                   <SelectItem value="default">
                     {labels.search.retrievalModes.default}
                   </SelectItem>
@@ -315,135 +282,194 @@ export function KnowledgeSearchPanel({
                   </SelectItem>
                 </SelectContent>
               </Select>
-            </label>
+            </div>
           </div>
-          <fieldset className="border-border/60 grid gap-2 border-t pt-3 text-[13px]">
-            <legend className="pr-2 font-medium">
-              {labels.search.filtersLabel}
-            </legend>
-            {filters.length > 0 ? (
-              <p className="text-muted-foreground text-xs">
-                {labels.search.filtersHint}
-              </p>
-            ) : null}
-            {filters.map((draft, index) => {
-              const field = fieldByName.get(draft.name);
-              const operators = operatorsForField(field);
-              const valueType =
-                field?.field_type === "number"
-                  ? "number"
-                  : field?.field_type === "time"
-                    ? "datetime-local"
-                    : "text";
-              return (
-                <div
-                  key={draft.key}
-                  className="flex flex-wrap items-center gap-2"
-                  data-testid="knowledge-filter-row"
-                >
-                  <Select
-                    value={draft.name}
-                    onValueChange={(name) => {
-                      // The value input type changes with the field type, so a
-                      // stale value text would be misleading; operators reset
-                      // to the always-valid eq.
-                      updateFilter(draft.key, {
-                        name,
-                        operator: "eq",
-                        value: "",
-                      });
-                    }}
-                  >
-                    <SelectTrigger
-                      className="border-border/70 bg-background w-40 rounded-lg text-[13px] shadow-none"
-                      aria-label={labels.search.filterFieldAria(index + 1)}
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
-                      {fieldItems.map((item) => (
-                        <SelectItem key={item.id} value={item.name}>
-                          {item.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={draft.operator}
-                    onValueChange={(operator) =>
-                      updateFilter(draft.key, {
-                        operator: operator as KnowledgeMetadataFilterOperator,
-                      })
-                    }
-                  >
-                    <SelectTrigger
-                      className="border-border/70 bg-background w-28 rounded-lg text-[13px] shadow-none"
-                      aria-label={labels.search.filterOperatorAria(index + 1)}
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
-                      {operators.map((operator) => (
-                        <SelectItem key={operator} value={operator}>
-                          {labels.search.operators[operator]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    className="border-border/70 bg-background h-9 w-44 flex-1 rounded-lg text-[13px] shadow-none md:text-[13px]"
-                    type={valueType}
-                    step={valueType === "number" ? "any" : undefined}
-                    value={draft.value}
-                    placeholder={labels.search.filterValuePlaceholder}
-                    aria-label={labels.search.filterValueAria(index + 1)}
-                    onChange={(event) =>
-                      updateFilter(draft.key, { value: event.target.value })
-                    }
-                  />
+          <Textarea
+            aria-labelledby={queryTitleId}
+            className="min-h-44 resize-none rounded-none border-0 bg-transparent px-5 py-4 text-sm leading-7 shadow-none focus-visible:ring-0 md:text-sm dark:bg-transparent"
+            value={query}
+            required
+            rows={6}
+            maxLength={2000}
+            placeholder={labels.search.queryPlaceholder}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter submits like a search box; Shift+Enter keeps the
+              // newline for multi-line questions. IME composition is left alone.
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
+          <div className="border-border/60 space-y-3 border-t px-5 py-3.5">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <label className="flex items-center gap-2 text-[13px]">
+                <span className="font-medium">{labels.search.topKLabel}</span>
+                <Input
+                  className="border-border/70 bg-background h-8 w-20 rounded-md text-[13px] shadow-none md:text-[13px]"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={topK}
+                  placeholder={String(base.default_top_k)}
+                  onChange={(event) => setTopK(event.target.value)}
+                />
+              </label>
+              <label className="flex items-center gap-2 text-[13px]">
+                <span className="font-medium">
+                  {labels.search.thresholdLabel}
+                </span>
+                <Input
+                  className="border-border/70 bg-background h-8 w-20 rounded-md text-[13px] shadow-none md:text-[13px]"
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={threshold}
+                  placeholder={String(base.default_score_threshold)}
+                  onChange={(event) => setThreshold(event.target.value)}
+                />
+              </label>
+            </div>
+            <fieldset className="grid gap-2 text-[13px]">
+              <legend className="sr-only">{labels.search.filtersLabel}</legend>
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-medium">
+                  {labels.search.filtersLabel}
+                </span>
+                {fieldItems.length > 0 ? (
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="text-muted-foreground size-8 rounded-lg"
-                    aria-label={labels.search.removeFilterAria(index + 1)}
-                    onClick={() =>
-                      setFilters((current) =>
-                        current.filter((item) => item.key !== draft.key),
-                      )
-                    }
+                    size="sm"
+                    className="text-muted-foreground hover:text-foreground h-7 rounded-md px-2 text-xs shadow-none"
+                    disabled={filters.length >= MAX_METADATA_FILTERS}
+                    onClick={addFilter}
                   >
-                    <XIcon aria-hidden className="size-4" />
+                    <PlusIcon aria-hidden className="size-3.5" />
+                    {labels.search.addFilter}
                   </Button>
-                </div>
-              );
-            })}
-            {fieldItems.length === 0 ? (
-              filters.length === 0 ? (
+                ) : null}
+              </div>
+              {filters.length > 0 ? (
+                <p className="text-muted-foreground text-xs">
+                  {labels.search.filtersHint}
+                </p>
+              ) : null}
+              {filters.map((draft, index) => {
+                const field = fieldByName.get(draft.name);
+                const operators = operatorsForField(field);
+                const valueType =
+                  field?.field_type === "number"
+                    ? "number"
+                    : field?.field_type === "time"
+                      ? "datetime-local"
+                      : "text";
+                return (
+                  <div
+                    key={draft.key}
+                    className="flex flex-wrap items-center gap-2"
+                    data-testid="knowledge-filter-row"
+                  >
+                    <Select
+                      value={draft.name}
+                      onValueChange={(name) => {
+                        // The value input type changes with the field type, so a
+                        // stale value text would be misleading; operators reset
+                        // to the always-valid eq.
+                        updateFilter(draft.key, {
+                          name,
+                          operator: "eq",
+                          value: "",
+                        });
+                      }}
+                    >
+                      <SelectTrigger
+                        className="border-border/70 bg-background w-40 rounded-lg text-[13px] shadow-none"
+                        aria-label={labels.search.filterFieldAria(index + 1)}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                        {fieldItems.map((item) => (
+                          <SelectItem key={item.id} value={item.name}>
+                            {item.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={draft.operator}
+                      onValueChange={(operator) =>
+                        updateFilter(draft.key, {
+                          operator: operator as KnowledgeMetadataFilterOperator,
+                        })
+                      }
+                    >
+                      <SelectTrigger
+                        className="border-border/70 bg-background w-28 rounded-lg text-[13px] shadow-none"
+                        aria-label={labels.search.filterOperatorAria(index + 1)}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="rounded-lg [&_[data-slot=select-item]]:text-[13px]">
+                        {operators.map((operator) => (
+                          <SelectItem key={operator} value={operator}>
+                            {labels.search.operators[operator]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      className="border-border/70 bg-background h-9 w-44 flex-1 rounded-lg text-[13px] shadow-none md:text-[13px]"
+                      type={valueType}
+                      step={valueType === "number" ? "any" : undefined}
+                      value={draft.value}
+                      placeholder={labels.search.filterValuePlaceholder}
+                      aria-label={labels.search.filterValueAria(index + 1)}
+                      onChange={(event) =>
+                        updateFilter(draft.key, { value: event.target.value })
+                      }
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="text-muted-foreground size-8 rounded-lg"
+                      aria-label={labels.search.removeFilterAria(index + 1)}
+                      onClick={() =>
+                        setFilters((current) =>
+                          current.filter((item) => item.key !== draft.key),
+                        )
+                      }
+                    >
+                      <XIcon aria-hidden className="size-4" />
+                    </Button>
+                  </div>
+                );
+              })}
+              {fieldItems.length === 0 && filters.length === 0 ? (
                 <p className="text-muted-foreground text-xs">
                   {labels.search.filterNoFields}
                 </p>
-              ) : null
-            ) : (
-              <div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="border-border/70 rounded-lg text-[13px] shadow-none"
-                  disabled={filters.length >= MAX_METADATA_FILTERS}
-                  onClick={addFilter}
-                >
-                  <PlusIcon aria-hidden className="size-4" />
-                  {labels.search.addFilter}
-                </Button>
-              </div>
-            )}
-          </fieldset>
-          <div className="pt-1">
+              ) : null}
+            </fieldset>
+          </div>
+          <div className="border-border/60 bg-muted/20 flex items-center justify-between gap-3 border-t px-5 py-3">
+            <span className="text-muted-foreground flex flex-wrap items-center gap-x-3 text-xs">
+              <span className="tabular-nums">{query.length}/2000</span>
+              <span className="hidden @lg/query:inline">
+                {labels.search.submitHint}
+              </span>
+            </span>
             <Button
               type="submit"
-              className="h-9 w-full rounded-lg text-[13px] shadow-none"
+              className="h-8 rounded-lg px-4 text-[13px] shadow-none"
               disabled={
                 search.isPending ||
                 !query.trim() ||
@@ -460,11 +486,15 @@ export function KnowledgeSearchPanel({
           </div>
         </form>
 
+        <div className="order-3 min-w-0 @4xl:order-none @4xl:col-start-1 @4xl:row-start-2">
+          <RecentQueriesSection scope={scope} base={base} onPick={setQuery} />
+        </div>
+
         <div
-          className="bg-muted/15 flex min-w-0 flex-col p-5"
+          className="border-border/80 bg-background order-2 flex min-w-0 flex-col overflow-hidden rounded-xl border @4xl:order-none @4xl:col-start-2 @4xl:row-span-2 @4xl:row-start-1 @4xl:self-stretch"
           data-testid="knowledge-search-outcome"
         >
-          <div className="border-border/60 mb-4 flex min-h-6 items-center justify-between gap-3 border-b pb-4">
+          <div className="border-border/60 flex min-h-6 items-center justify-between gap-3 border-b px-5 py-3.5">
             <h3 className="flex items-center gap-2 text-[13px] font-semibold">
               <FileTextIcon
                 aria-hidden
@@ -487,61 +517,67 @@ export function KnowledgeSearchPanel({
               </div>
             </details>
           </div>
-          {search.error ? (
-            <div
-              role="alert"
-              data-testid="knowledge-search-error"
-              className="border-destructive/40 bg-destructive/5 space-y-3 rounded-lg border px-4 py-4"
-            >
-              <p className="text-destructive text-[13px]">
-                {knowledgeErrorMessage(search.error, labels.errors)}
-              </p>
-              {lastInput ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="rounded-lg text-[13px] shadow-none"
-                  disabled={search.isPending}
-                  onClick={() => search.mutate(lastInput)}
-                >
-                  {labels.search.retry}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="bg-muted/20 flex flex-1 flex-col p-5">
+            {search.error ? (
+              <div
+                role="alert"
+                data-testid="knowledge-search-error"
+                className="border-destructive/40 bg-destructive/5 space-y-3 rounded-lg border px-4 py-4"
+              >
+                <p className="text-destructive text-[13px]">
+                  {knowledgeErrorMessage(search.error, labels.errors)}
+                </p>
+                {lastInput ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="rounded-lg text-[13px] shadow-none"
+                    disabled={search.isPending}
+                    onClick={() => search.mutate(lastInput)}
+                  >
+                    {labels.search.retry}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
 
-          {search.isPending ? (
-            <div className="grid gap-3" aria-hidden>
-              <Skeleton className="h-32 rounded-lg" />
-              <Skeleton className="h-32 rounded-lg" />
-            </div>
-          ) : null}
+            {search.isPending ? (
+              <div className="grid gap-3" aria-hidden>
+                <Skeleton className="h-32 rounded-lg" />
+                <Skeleton className="h-32 rounded-lg" />
+              </div>
+            ) : null}
 
-          {!search.isPending && search.error === null && !search.data ? (
-            <div
-              className="flex min-h-72 flex-1 flex-col items-center justify-center px-5 py-10 text-center"
-              data-testid="knowledge-search-never"
-            >
-              <span className="border-border/70 bg-background text-muted-foreground mb-4 inline-flex size-11 items-center justify-center rounded-xl border">
-                <SearchIcon aria-hidden className="size-5" strokeWidth={1.5} />
-              </span>
-              <p className="text-[13px] font-medium">
-                {labels.search.waitingTitle}
-              </p>
-              <p className="text-muted-foreground mt-2 max-w-64 text-xs leading-5">
-                {labels.search.neverSearched}
-              </p>
-            </div>
-          ) : null}
+            {!search.isPending && search.error === null && !search.data ? (
+              <div
+                className="flex min-h-56 flex-1 flex-col items-center justify-center px-5 py-10 text-center"
+                data-testid="knowledge-search-never"
+              >
+                <span className="border-border/60 bg-background text-muted-foreground mb-4 inline-flex size-14 items-center justify-center rounded-2xl border shadow-xs">
+                  <SearchIcon
+                    aria-hidden
+                    className="size-6"
+                    strokeWidth={1.5}
+                  />
+                </span>
+                <p className="text-sm font-medium">
+                  {labels.search.waitingTitle}
+                </p>
+                <p className="text-muted-foreground mt-1.5 max-w-72 text-[13px] leading-5">
+                  {labels.search.neverSearched}
+                </p>
+              </div>
+            ) : null}
 
-          {search.data && !search.isPending ? (
-            <SearchOutcome
-              data={search.data}
-              scopeKey={scopeKey}
-              onOpenHit={setOpenHit}
-            />
-          ) : null}
+            {search.data && !search.isPending ? (
+              <SearchOutcome
+                data={search.data}
+                scopeKey={scopeKey}
+                onOpenHit={setOpenHit}
+              />
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -564,8 +600,6 @@ export function KnowledgeSearchPanel({
           }
         />
       ) : null}
-
-      <RecentQueriesSection scope={scope} base={base} onPick={setQuery} />
     </section>
   );
 }
@@ -607,7 +641,10 @@ function SearchOutcome({
       <h3 className="text-[13px] font-semibold">
         {labels.search.resultsTitle(data.citations.length)}
       </h3>
-      <ol className="grid gap-2" data-testid="knowledge-search-results">
+      {/* Block flow, not grid: a grid item makes its height definite for
+          percentage children, and the Markdown renderer's `size-full` root
+          would then fill the card and push the actions out of view. */}
+      <ol className="space-y-2" data-testid="knowledge-search-results">
         {data.citations.map((citation, index) => {
           const position = formatKnowledgeSourcePosition(
             citation.source_position,
@@ -760,7 +797,7 @@ function SearchDiagnosticsDisclosure({
   ];
   return (
     <details
-      className="border-border/70 bg-muted/15 rounded-lg border px-4 py-3"
+      className="border-border/70 bg-background rounded-lg border px-4 py-3"
       data-testid="knowledge-search-diagnostics"
     >
       <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-[13px] font-medium transition-colors">
@@ -1110,72 +1147,61 @@ function RecentQueriesSection({
           {knowledgeErrorMessage(recent.error, labels.errors)}
         </p>
       ) : (recent.data?.items.length ?? 0) === 0 ? (
-        <p className="text-muted-foreground px-5 py-6 text-center text-xs">
-          {labels.search.recentEmpty}
-        </p>
+        <div className="flex flex-col items-center gap-2.5 px-5 py-8 text-center">
+          <span className="bg-muted text-muted-foreground inline-flex size-9 items-center justify-center rounded-lg">
+            <HistoryIcon aria-hidden className="size-4" strokeWidth={1.5} />
+          </span>
+          <p className="text-muted-foreground text-xs">
+            {labels.search.recentEmpty}
+          </p>
+        </div>
       ) : (
         <>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-[13px]">
-              <thead className="bg-muted/30 text-muted-foreground text-xs [&_th]:font-medium">
-                <tr>
-                  <th className="px-4 py-2.5">
-                    {labels.search.recentColumns.query}
-                  </th>
-                  <th className="px-4 py-2.5">
-                    {labels.search.recentColumns.source}
-                  </th>
-                  <th className="px-4 py-2.5">
-                    {labels.search.recentColumns.results}
-                  </th>
-                  <th className="px-4 py-2.5">
-                    {labels.search.recentColumns.topScore}
-                  </th>
-                  <th className="px-4 py-2.5">
-                    {labels.search.recentColumns.time}
-                  </th>
-                </tr>
-              </thead>
-              <tbody data-testid="knowledge-recent-queries">
-                {recent.data?.items.map((item) => (
-                  <tr
-                    key={item.id}
-                    className="border-border/60 hover:bg-muted/20 border-t align-top transition-colors"
-                  >
-                    <td className="max-w-72 px-4 py-2.5">
-                      <button
-                        type="button"
-                        className="hover:text-selection focus-visible:ring-selection/40 block w-full cursor-pointer truncate rounded-sm text-left underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
-                        title={item.query}
-                        onClick={() => onPick(item.query)}
-                      >
-                        {item.query}
-                      </button>
-                    </td>
-                    <td className="px-4 py-2.5">
+          <table className="w-full table-fixed text-left text-[13px]">
+            <tbody
+              className="divide-border/60 divide-y"
+              data-testid="knowledge-recent-queries"
+            >
+              {recent.data?.items.map((item) => (
+                <tr
+                  key={item.id}
+                  className="hover:bg-muted/20 align-top transition-colors"
+                >
+                  <td className="min-w-0 px-5 py-3">
+                    <button
+                      type="button"
+                      className="hover:text-selection focus-visible:ring-selection/40 block w-full cursor-pointer truncate rounded-sm text-left font-medium underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
+                      title={item.query}
+                      onClick={() => onPick(item.query)}
+                    >
+                      {item.query}
+                    </button>
+                    <div className="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
                       <Badge
                         variant="outline"
-                        className="border-border/70 text-muted-foreground rounded-md font-normal"
+                        className="border-border/70 text-muted-foreground h-5 rounded-md px-1.5 font-normal"
                       >
                         {labels.search.recentSource[item.source]}
                       </Badge>
-                    </td>
-                    <td className="text-muted-foreground px-4 py-2.5 tabular-nums">
-                      {item.result_count}
-                    </td>
-                    <td className="text-muted-foreground px-4 py-2.5 tabular-nums">
-                      {item.top_score === null
-                        ? "—"
-                        : item.top_score.toFixed(3)}
-                    </td>
-                    <td className="text-muted-foreground px-4 py-2.5 text-xs whitespace-nowrap">
-                      {new Date(item.created_at).toLocaleString(locale)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      <span className="tabular-nums">
+                        {labels.search.recentColumns.results}{" "}
+                        {item.result_count}
+                      </span>
+                      <span className="whitespace-nowrap">
+                        {new Date(item.created_at).toLocaleString(locale)}
+                      </span>
+                    </div>
+                  </td>
+                  <td
+                    className="w-20 px-5 py-3 text-right whitespace-nowrap tabular-nums"
+                    title={labels.search.recentColumns.topScore}
+                  >
+                    {item.top_score === null ? "—" : item.top_score.toFixed(3)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
           {pageCount > 1 ? (
             <div className="border-border/60 flex items-center justify-between gap-2 border-t px-5 py-3 text-xs">
               <span className="text-muted-foreground tabular-nums">

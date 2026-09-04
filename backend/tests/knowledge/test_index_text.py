@@ -1,9 +1,57 @@
 from __future__ import annotations
 
+from inspect import unwrap
+
 import pytest
 from actweave_knowledge.extraction.builtin.markdown_extractor import markdown_sections
 from actweave_knowledge.extraction.contracts import Document, SourceSpan
+from actweave_knowledge.ingestion import index_text
 from actweave_knowledge.ingestion.index_text import build_index_text, has_indexable_source_text
+
+
+@pytest.mark.parametrize("source", [False, True])
+def test_shared_index_text_parsers_need_no_lazy_rule_compilation(source: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publishing uncompiled rule chains lets concurrent calls observe partial rules."""
+
+    name = "_source_parser" if source else "_parser"
+    parser = unwrap(getattr(index_text, name))()
+
+    def fail_late_compilation() -> None:
+        pytest.fail("shared parser must compile its rules before publication")
+
+    for ruler in (parser.core.ruler, parser.block.ruler, parser.inline.ruler, parser.inline.ruler2):
+        monkeypatch.setattr(ruler, "__compile__", fail_late_compilation)
+    monkeypatch.setattr(index_text, name, lambda: parser)
+    markdown = "| 设备 | 状态 |\n| --- | --- |\n| **路由器** | `正常` |"
+
+    if source:
+        document = Document(page_content=markdown, source_spans=(SourceSpan(block_id="body", start=0, end=len(markdown), location={"paragraph": 1}),))
+        assert has_indexable_source_text((document,))
+    else:
+        assert build_index_text(markdown) == "设备\n状态\n路由器\n正常"
+
+
+def test_index_text_reuses_parsers_without_mixing_source_attribution_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Constructing a parser per chunk candidate dominates measurement; sharing the mutated source parser drops inline text."""
+
+    markdown = "**设备** 正常"
+    document = Document(page_content=markdown, source_spans=(SourceSpan(block_id="body", start=0, end=len(markdown), location={"paragraph": 1}),))
+    build_index_text(markdown)
+    has_indexable_source_text((document,))
+    real_parser_class = index_text.MarkdownIt
+    constructed: list[str] = []
+
+    def counting_parser(*args: object, **kwargs: object) -> object:
+        constructed.append("MarkdownIt")
+        return real_parser_class(*args, **kwargs)
+
+    monkeypatch.setattr(index_text, "MarkdownIt", counting_parser)
+
+    for _ in range(3):
+        assert has_indexable_source_text((document,))
+        assert build_index_text(markdown) == "设备 正常"
+
+    assert constructed == []
 
 
 def test_index_text_keeps_code_and_labels_but_not_attachment_uri() -> None:
