@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 from actweave_knowledge import (
@@ -13,24 +14,100 @@ from actweave_knowledge import (
     KnowledgeSegmentCreate,
     KnowledgeSegmentUpdate,
 )
-from actweave_knowledge.extraction.contracts import ProcessingProfile
+from actweave_knowledge.extraction.contracts import ExtractionError, ProcessingProfile
 from actweave_knowledge.ingestion.index_text import build_index_text
 from actweave_knowledge.ingestion.tokenizer import count_knowledge_tokens
 from actweave_knowledge.persistence.derivations import stored_model_text
 from actweave_knowledge.persistence.models import (
     KnowledgeAttachmentRow,
+    KnowledgeDocumentRow,
     KnowledgeSegmentAttachmentRow,
     KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
 )
 from actweave_knowledge.retrieval import lexical_index_input
-from ingestion_test_helpers import ingestion_harness
+from actweave_knowledge.segments.service import KnowledgeSegmentService, _manual_derivation
+from ingestion_test_helpers import FakeModelClient, ingestion_harness
 from parsing_test_helpers import (
     make_chunk_profile,
     make_parse_profile,
     write_docx_with_image,
 )
 from sqlalchemy import func, select
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["splitter_version", "cleaner_version"])
+async def test_manual_old_token_profile_rejects_before_model_dispatch(field: str) -> None:
+    """A stale token splitter must not send a manual child derivation to a model."""
+
+    chunk = make_chunk_profile(mode="parent_child", size=200, child_size=100, overlap=0)
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=chunk.model_copy(update={field: "old-unavailable-build"}),
+    )
+    document = SimpleNamespace(
+        chunking_mode="parent_child",
+        child_chunk_size=100,
+        child_chunk_separator="\n\n",
+        parsing_profile=profile.model_dump(mode="json"),
+    )
+    client = FakeModelClient()
+    service = SimpleNamespace(_client=client)
+
+    with pytest.raises(ExtractionError) as error:
+        await KnowledgeSegmentService._embed_for_document(
+            service,
+            document,
+            "alpha beta gamma",
+            None,
+            available_vector_entries=5000,
+            authority=None,
+        )
+
+    assert error.value.reason_code == "PROCESSING_PROFILE_UNAVAILABLE"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "unit"),
+    [("general", "token"), ("parent_child", "character"), ("parent_child", None)],
+)
+def test_manual_non_resplitting_and_character_paths_keep_their_contract(
+    mode: str,
+    unit: str | None,
+) -> None:
+    """Only stale token re-splitting is rejected; historic compatible paths remain usable."""
+
+    profile = (
+        None
+        if unit is None
+        else ProcessingProfile(
+            parse=make_parse_profile(".md"),
+            chunk=make_chunk_profile(
+                unit=unit,
+                mode=mode,
+                size=200,
+                child_size=100,
+                overlap=0,
+                splitter_version="historical-version",
+            ),
+        ).model_dump(mode="json")
+    )
+    document = SimpleNamespace(
+        chunking_mode=mode,
+        child_chunk_size=100,
+        child_chunk_separator="\n\n",
+        parsing_profile=profile,
+    )
+    content = "alpha beta gamma"
+
+    index_text, token_count, children = _manual_derivation(document, content)
+
+    assert index_text == content
+    assert token_count == count_knowledge_tokens(content)
+    assert bool(children) == (mode == "parent_child")
+    assert all(child.source_spans == () for child in children)
 
 
 def _profile(*, unit: str) -> dict[str, object]:
@@ -201,6 +278,89 @@ async def test_manual_parent_child_update_uses_child_index_text_and_replaces_chi
         [updated] = await harness.segments(document.id)
         assert updated.index_text == build_index_text(edited)
         assert updated.source_spans == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update"])
+async def test_old_profile_manual_mutations_leave_publication_unchanged(
+    postgres_database_url: str,
+    tmp_path,
+    operation: str,
+) -> None:
+    """A stale frozen token profile leaves its published parent and children intact."""
+
+    source = tmp_path / "parent.md"
+    source.write_text("原始正文。" * 10, encoding="utf-8")
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=make_chunk_profile(mode="parent_child", size=200, child_size=100, overlap=0),
+    )
+    async with ingestion_harness(postgres_database_url) as harness:
+        document = await harness.upload(source, profile)
+        await harness.run_next_task()
+        [parent] = await harness.segments(document.id)
+        before = (parent.id, parent.content, parent.index_text, parent.document_version, parent.source_spans)
+        async with harness.resources.session_factory() as session, session.begin():
+            row = await session.get(KnowledgeDocumentRow, document.id)
+            assert row is not None
+            frozen = {
+                **row.parsing_profile,
+                "chunk": {**row.parsing_profile["chunk"], "splitter_version": "splitter-v2"},
+            }
+            row.parsing_profile = frozen
+            before_children = list(
+                (
+                    await session.execute(
+                        select(
+                            KnowledgeSegmentChildRow.id,
+                            KnowledgeSegmentChildRow.content,
+                            KnowledgeSegmentChildRow.index_text,
+                        )
+                        .where(KnowledgeSegmentChildRow.knowledge_segment_id == parent.id)
+                        .order_by(KnowledgeSegmentChildRow.position)
+                    )
+                ).all()
+            )
+        harness.fake_model.calls.clear()
+
+        with pytest.raises(KnowledgeError) as error:
+            if operation == "update":
+                await harness.module.update_segment(
+                    harness.resources.project_id,
+                    parent.id,
+                    KnowledgeSegmentUpdate(content="修改后的正文"),
+                    authority=harness.authority,
+                )
+            else:
+                await harness.module.create_segment(
+                    harness.resources.project_id,
+                    document.id,
+                    KnowledgeSegmentCreate(content="新增正文"),
+                    authority=harness.authority,
+                )
+
+        assert error.value.reason_code == "PROCESSING_PROFILE_UNAVAILABLE"
+        assert harness.fake_model.calls == []
+        [after] = await harness.segments(document.id)
+        assert (after.id, after.content, after.index_text, after.document_version, after.source_spans) == before
+        async with harness.resources.session_factory() as session:
+            row = await session.get(KnowledgeDocumentRow, document.id)
+            assert row is not None
+            assert row.parsing_profile == frozen
+            after_children = list(
+                (
+                    await session.execute(
+                        select(
+                            KnowledgeSegmentChildRow.id,
+                            KnowledgeSegmentChildRow.content,
+                            KnowledgeSegmentChildRow.index_text,
+                        )
+                        .where(KnowledgeSegmentChildRow.knowledge_segment_id == parent.id)
+                        .order_by(KnowledgeSegmentChildRow.position)
+                    )
+                ).all()
+            )
+        assert after_children == before_children
 
 
 async def _bindings(session_factory, segment_id):  # noqa: ANN001, ANN202

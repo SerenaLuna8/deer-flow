@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..builtin.html_extractor import html_to_documents
 from ..contracts import Document, ParseWarning, SourceSpan
+from ..literal import escape_literal_text
 
 
 def elements_to_documents(elements, *, kind: str) -> list[Document]:
@@ -38,7 +39,7 @@ def elements_to_documents(elements, *, kind: str) -> list[Document]:
                         documents.append(doc.model_copy(update={"source_spans": spans, "heading_path": heading_path, "warnings": warnings + local_warnings}))
                     continue
             warnings += (ParseWarning(code="TABLE_STRUCTURE_UNAVAILABLE", message="解析库未提供表格结构", source_position=location),)
-        documents.append(
-            Document(page_content=text, kind=kind if category != "Table" else "table", heading_path=heading_path, warnings=warnings, source_spans=(SourceSpan(block_id=f"{kind}:element:{index}", start=0, end=len(text), location=location),))
-        )
+        text = escape_literal_text(text)
+        document_kind = "title" if category == "Title" else "table" if category == "Table" else kind
+        documents.append(Document(page_content=text, kind=document_kind, heading_path=heading_path, warnings=warnings, source_spans=(SourceSpan(block_id=f"{kind}:element:{index}", start=0, end=len(text), location=location),)))
     return documents

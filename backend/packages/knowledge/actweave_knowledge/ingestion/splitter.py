@@ -24,7 +24,7 @@ from ..extraction.contracts import AttachmentOccurrence, ChunkProfile, Document,
 from .extractor import ExtractedBlock
 from .index_text import build_index_text, has_indexable_source_text
 from .source_mapping import clip_source_spans
-from .structure import StructureUnit, context_unit, inline_atoms, join_units, slice_unit, structure_groups, trim_unit
+from .structure import StructureUnit, context_unit, inline_atoms, join_units, slice_fragment, slice_unit, structure_groups, trim_unit
 from .tokenizer import TOKENIZER_PROFILE_ID, PrefixTokenCounter, count_knowledge_tokens, tokenizer_fingerprint
 
 _LINE_BREAKS = re.compile(r"\r\n?")
@@ -275,7 +275,7 @@ def _first_location(unit: StructureUnit) -> dict[str, str | int]:
 def _truncate_to_fit(unit: StructureUnit, fits: Callable[[StructureUnit], bool]) -> StructureUnit:
     """Longest fitting prefix of ``unit`` on a boundary outside inline atoms."""
 
-    atoms = inline_atoms(unit.content)
+    atoms = inline_atoms(unit.content, include_text_escapes=True)
     boundaries = [end for end in range(1, len(unit.content) + 1) if not any(a < end < b for a, b in atoms)]
     if not boundaries or not fits(slice_unit(unit, 0, boundaries[0])):
         raise _prefix_error()
@@ -366,24 +366,24 @@ def _split_ranges(unit: StructureUnit, separators: list[str], fits: Callable[[St
     if fits(unit):
         yield unit
         return
-    atoms = inline_atoms(unit.content)
+    atoms = inline_atoms(unit.content, include_text_escapes=True)
     for index, separator in enumerate(separators):
         if not separator:
             start = 0
             while start < len(unit.content):
                 ceiling = min(start + 4000, len(unit.content))
                 boundaries = [end for end in range(start + 1, ceiling + 1) if not any(a < end < b for a, b in atoms)]
-                if not boundaries or not fits(slice_unit(unit, start, boundaries[0])):
+                if not boundaries or not fits(slice_fragment(unit, start, boundaries[0])):
                     raise ExtractionError("ATOMIC_CONTENT_EXCEEDS_BUDGET", "不可拆分的链接或图片超过分段预算")
                 low, high = 0, len(boundaries) - 1
                 while low < high:
                     middle = (low + high + 1) // 2
-                    if fits(slice_unit(unit, start, boundaries[middle])):
+                    if fits(slice_fragment(unit, start, boundaries[middle])):
                         low = middle
                     else:
                         high = middle - 1
                 end = boundaries[low]
-                yield slice_unit(unit, start, end)
+                yield slice_fragment(unit, start, end)
                 start = end
             return
         start = cursor = 0
@@ -394,12 +394,12 @@ def _split_ranges(unit: StructureUnit, separators: list[str], fits: Callable[[St
             if any(a < stop < b or a <= found < b for a, b in atoms):
                 continue
             found_boundary = True
-            piece = slice_unit(unit, start, stop)
+            piece = slice_fragment(unit, start, stop)
             yield from _split_ranges(piece, separators[index + 1 :], fits)
             start = stop
         if found_boundary:
             if start < len(unit.content):
-                yield from _split_ranges(slice_unit(unit, start, len(unit.content)), separators[index + 1 :], fits)
+                yield from _split_ranges(slice_fragment(unit, start, len(unit.content)), separators[index + 1 :], fits)
             return
     raise _prefix_error()
 
@@ -419,7 +419,7 @@ def _indented_code_body(unit: StructureUnit) -> StructureUnit:
             cut += 1
         parts.append(slice_unit(unit, offset + cut, offset + len(line)))
         offset += len(line)
-    return join_units(parts, "")
+    return replace(join_units(parts, ""), kind=unit.kind)
 
 
 def _code_pieces(unit: StructureUnit, prefix: StructureUnit, limit: int, separator: str, *, following: tuple[StructureUnit, ...] = ()) -> Iterator[StructureUnit]:
@@ -514,8 +514,93 @@ def _field_pieces(unit: StructureUnit, prefix: StructureUnit, limit: int, separa
 
 def _append_piece(pending: list[StructureUnit] | tuple[StructureUnit, ...], piece: StructureUnit, *, continuation: bool) -> list[StructureUnit]:
     if continuation and pending:
-        return [*pending[:-1], replace(join_units([pending[-1], piece], ""), kind="text_fragment")]
+        return [*pending[:-1], replace(join_units([pending[-1], piece], ""), kind=piece.kind)]
     return [*pending, piece]
+
+
+def _overlap_suffix(unit: StructureUnit, separators: list[str], fits: Callable[[StructureUnit], bool]) -> StructureUnit | None:
+    atoms = inline_atoms(unit.content, include_text_escapes=True)
+    content_end = len(unit.content.rstrip())
+    for separator in separators:
+        starts = [match.end() for match in re.finditer(re.escape(separator), unit.content)] if separator else list(range(1, len(unit.content)))
+        starts = [start for start in starts if start < content_end and not any(a < start < b for a, b in atoms)]
+        low, high = 0, len(starts)
+        while low < high:
+            middle = (low + high) // 2
+            if fits(slice_fragment(unit, starts[middle], len(unit.content))):
+                high = middle
+            else:
+                low = middle + 1
+        if low < len(starts):
+            candidate = slice_fragment(unit, starts[low], len(unit.content))
+            if fits(candidate) and _has_source_text(candidate):
+                return candidate
+    return None
+
+
+def _overlap_tail(pending: list[StructureUnit], separator: str, overlap: int, separators: list[str]) -> list[StructureUnit]:
+    retained: list[StructureUnit] = []
+    for unit in reversed(pending):
+        if unit.kind not in {"paragraph", "markdown", "page", "text_fragment", "list"} or unit.attachments:
+            break
+        if any(unit.content.startswith("![", start) for start, _ in inline_atoms(unit.content, include_text_escapes=True)):
+            break
+        candidate = [unit, *retained]
+        if fits_chunk(join_units(candidate, separator).content, overlap):
+            retained = candidate
+            continue
+        if not retained and unit.kind != "list":
+            suffix = _overlap_suffix(unit, separators, lambda value: fits_chunk(value.content, overlap))
+            if suffix is not None:
+                retained = [suffix]
+        break
+    return retained
+
+
+def _reserve_overlap(
+    prefix: StructureUnit,
+    retained: list[StructureUnit],
+    piece: StructureUnit,
+    separator: str,
+    *,
+    limit: int,
+    overlap: int,
+    separators: list[str],
+    continuation: bool,
+) -> tuple[list[StructureUnit], StructureUnit, StructureUnit | None]:
+    def fits(value: StructureUnit) -> bool:
+        return fits_chunk(join_units(retained, separator).content, overlap) and fits_chunk(_render(prefix, _append_piece(retained, value, continuation=continuation), separator).content, limit)
+
+    if not retained or fits(piece):
+        return retained, piece, None
+    if piece.kind not in {"paragraph", "markdown", "page", "text_fragment"} or piece.attachments:
+        while retained and not fits(piece):
+            retained.pop(0)
+        return retained, piece, None
+
+    start = len(piece.content) - len(piece.content.lstrip())
+    end = min(start + 1, len(piece.content))
+    for atom_start, atom_end in inline_atoms(piece.content, include_text_escapes=True):
+        if atom_start <= start < atom_end:
+            end = atom_end
+            break
+    minimum = slice_unit(piece, 0, end)
+    while retained and not fits(minimum):
+        if len(retained) > 1 or retained[0].kind == "list":
+            retained.pop(0)
+            continue
+        suffix = _overlap_suffix(
+            retained[0],
+            separators,
+            lambda value: fits_chunk(value.content, overlap) and fits_chunk(_render(prefix, _append_piece([value], minimum, continuation=continuation), separator).content, limit),
+        )
+        retained = [suffix] if suffix is not None else []
+    if not retained or fits(piece):
+        return retained, piece, None
+
+    first = next(_split_ranges(piece, separators, fits))
+    rest = slice_fragment(piece, len(first.content), len(piece.content))
+    return retained, replace(first, kind="text_fragment"), replace(rest, kind="text_fragment") if rest.content else None
 
 
 def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: str, *, limit: int, overlap: int, user_separator: str, warn: WarningSink = _ignore_warning) -> Iterator[StructureUnit]:
@@ -571,14 +656,14 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
         # Ordinary split fragments remain adjacent; separators between original
         # blocks are added only once, not between every word or Unicode scalar.
         if fragmented and unit.kind not in {"code", "indented_code", "table_row", "fields"}:
-            pieces = (replace(piece, kind="text_fragment") for piece in pieces)
+            pieces = (replace(piece, kind="list_fragment" if unit.kind == "list" else "text_fragment") for piece in pieces)
         piece_stream = iter(enumerate(pieces))
         while True:
             try:
                 piece_index, piece = next(piece_stream)
             except StopIteration:
                 break
-            continuation = piece.kind == "text_fragment" and piece_index > 0
+            continuation = piece.kind in {"text_fragment", "list_fragment"} and piece_index > 0
             candidate = _append_piece(pending, piece, continuation=continuation)
             if pending and not fits_chunk(_render(prefix, candidate, separator).content, limit, counters=counters):
                 if not _has_source_text(join_units(pending, separator)) and _has_source_text(piece):
@@ -597,7 +682,7 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
                         replacements = ((0, part) for part in subdivisions)
                     else:
                         subdivisions = _split_ranges(piece, separators, fits_leading)
-                        replacements = ((piece_index if index == 0 else 1, replace(part, kind="text_fragment")) for index, part in enumerate(subdivisions))
+                        replacements = ((piece_index if index == 0 else 1, replace(part, kind="list_fragment" if unit.kind == "list" else "text_fragment")) for index, part in enumerate(subdivisions))
                     piece_stream = chain(replacements, piece_stream)
                     continue
                 if not _has_source_text(piece) and inline_atoms(piece.content):
@@ -633,19 +718,24 @@ def _pack_group(prefix: StructureUnit, units: list[StructureUnit], separator: st
                     yield trim_unit(_render(prefix, pending, separator))
                 prefix = context_unit(prefix)
                 retained = []
-                if overlap and all(value.kind in {"paragraph", "markdown", "list"} and not value.attachments for value in pending) and piece.kind not in {"table_row", "fields", "code"}:
-                    for value in reversed(pending):
-                        tail = [value, *retained]
-                        if count_knowledge_tokens(join_units(tail, separator).content) > overlap:
-                            break
-                        retained = tail
-                pending = retained
-                while pending and not fits_chunk(_render(prefix, [*pending, piece], separator).content, limit, counters=counters):
-                    pending.pop(0)
+                if overlap and piece.kind in {"paragraph", "markdown", "page", "text_fragment", "list"} and not piece.attachments:
+                    retained = _overlap_tail(pending, separator, overlap, separators)
+                pending, piece, rest = _reserve_overlap(
+                    prefix,
+                    retained,
+                    piece,
+                    separator,
+                    limit=limit,
+                    overlap=overlap,
+                    separators=separators,
+                    continuation=continuation,
+                )
+                if rest is not None:
+                    piece_stream = chain(((1, rest),), piece_stream)
                 fresh = False
-                candidate = [*pending, piece]
+                candidate = _append_piece(pending, piece, continuation=continuation)
             pending = candidate
-            fresh = True
+            fresh = fresh or _has_source_text(piece)
     if pending and fresh:
         yield trim_unit(_render(prefix, pending, separator))
 
@@ -691,6 +781,10 @@ def split_documents(documents: tuple[Document, ...], *, profile: ChunkProfile, w
 
     if profile.unit == "character":
         return _split_character_documents(documents, profile)
+    from .profiles import CLEANER_VERSION, SPLITTER_VERSION
+
+    if profile.splitter_version != SPLITTER_VERSION or profile.cleaner_version != CLEANER_VERSION:
+        raise ExtractionError("PROCESSING_PROFILE_UNAVAILABLE", "原解析配置已不可用，请显式重新解析")
     if not 200 <= profile.size <= 4000 or not 0 <= profile.overlap <= 500 or profile.overlap >= profile.size or (profile.mode == "parent_child" and (not 100 <= profile.child_size <= 2000 or profile.child_size >= profile.size)):
         raise ValueError("invalid Knowledge token chunk limits")
     if profile.tokenizer_profile_id != TOKENIZER_PROFILE_ID or profile.tokenizer_digest != tokenizer_fingerprint():

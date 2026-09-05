@@ -18,7 +18,6 @@ import {
   getProject,
   leaveProject,
   listAllProjects,
-  listMyProjectInvitations,
   listProjectInvitations,
   listProjectMembers,
   pinProject,
@@ -639,17 +638,6 @@ export function useProjectMembers(
       return listProjectMembers(identity.projectId ?? "", signal);
     },
     enabled: Boolean(userId && projectId),
-  });
-}
-
-export function useMyProjectInvitations(userId: string | null | undefined) {
-  return useQuery({
-    queryKey: projectKeys.myInvitations(userId ?? ""),
-    queryFn: ({ signal }) => {
-      requireProjectIdentity(userId);
-      return listMyProjectInvitations(signal);
-    },
-    enabled: Boolean(userId),
   });
 }
 

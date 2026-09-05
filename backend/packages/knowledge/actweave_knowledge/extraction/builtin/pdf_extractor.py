@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import io
 import math
-import re
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,6 +21,7 @@ from actweave_knowledge.contracts import KNOWLEDGE_QUOTA_EXCEEDED, KnowledgeErro
 from ..base import BaseExtractor
 from ..contracts import AttachmentOccurrence, Document, ExtractionContext, ExtractionError, ExtractSetting, ParseWarning, SourceSpan
 from ..images import ImageRejected, work_directory_bytes
+from ..literal import escape_literal_text
 
 
 class _BoundedImageBuffer(io.BytesIO):
@@ -62,10 +62,7 @@ class PdfExtractor(BaseExtractor):
                             raise KnowledgeError(KNOWLEDGE_QUOTA_EXCEEDED, "提取正文长度超过限制")
                         context.check_cancelled()
                         content = text_page.get_text_range().replace("\r\n", "\n")
-                        # PDF text is literal, not executable Markdown. Escape
-                        # delimiters before assigning spans so image refs cannot
-                        # be swallowed by an unclosed code fence or HTML block.
-                        content = re.sub(r"([\\`*_\[\]<>#!|~])", r"\\\1", content)
+                        content = escape_literal_text(content)
                     finally:
                         text_page.close()
                     context.check_cancelled()

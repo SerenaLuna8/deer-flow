@@ -30,7 +30,10 @@ export type KnowledgeDocumentListView = {
 
 export const KNOWLEDGE_DOCUMENT_LIST_PAGE_SIZE = 20;
 
-type Comparator = (a: KnowledgeDocumentItem, b: KnowledgeDocumentItem) => number;
+type Comparator = (
+  a: KnowledgeDocumentItem,
+  b: KnowledgeDocumentItem,
+) => number;
 
 function compareCreated(a: KnowledgeDocumentItem, b: KnowledgeDocumentItem) {
   return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0;

@@ -6,8 +6,12 @@ rs.mock("@/core/api/fetcher", () => ({
 }));
 
 import { fetch as authenticatedFetch } from "@/core/api/fetcher";
-import { updateKnowledgeBase } from "@/core/knowledge/api";
 import {
+  reparseKnowledgeBase,
+  updateKnowledgeBase,
+} from "@/core/knowledge/api";
+import {
+  knowledgeBaseItemSchema,
   knowledgeModelOptionsResponseSchema,
   knowledgeTaskProgressSchema,
   knowledgeSegmentDetailResponseSchema,
@@ -33,6 +37,7 @@ const base = {
   default_top_k: 4,
   default_score_threshold: 0.2,
   default_relative_cutoff: null,
+  chunking_mode: null,
   delete_error: null,
   created_at: "2026-08-31T00:00:00Z",
   updated_at: "2026-08-31T00:00:00Z",
@@ -90,6 +95,57 @@ test("updating a base preserves the atomic backfill receipt", async () => {
   expect(result.summary_backfill).toEqual({
     accepted_document_count: 1,
     skipped_document_ids: ["50000000-0000-4000-8000-000000000001"],
+  });
+});
+
+test("the base contract carries the nullable base-wide chunking mode and the base reparse posts one parameter set", async () => {
+  expect(knowledgeBaseItemSchema.safeParse(base).success).toBe(true);
+  expect(
+    knowledgeBaseItemSchema.safeParse({
+      ...base,
+      chunking_mode: "parent_child",
+    }).success,
+  ).toBe(true);
+  expect(
+    knowledgeBaseItemSchema.safeParse({ ...base, chunking_mode: "fancy" })
+      .success,
+  ).toBe(false);
+  // Strict: an older server without the field is a contract mismatch, not a
+  // silently unlocked base.
+  const withoutMode: Record<string, unknown> = { ...base };
+  delete withoutMode.chunking_mode;
+  expect(knowledgeBaseItemSchema.safeParse(withoutMode).success).toBe(false);
+
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        item: { ...base, chunking_mode: "parent_child" },
+        accepted_document_count: 2,
+        skipped_document_ids: [],
+        request_id: "base-reparse",
+      }),
+      { status: 200 },
+    ),
+  );
+  const result = await reparseKnowledgeBase(base.project_id, base.id, {
+    chunk_size: 800,
+    chunk_overlap: 100,
+    chunk_separator: "\\n\\n",
+    remove_extra_spaces: false,
+    remove_urls_emails: false,
+    chunking_mode: "parent_child",
+    child_chunk_size: 300,
+    child_chunk_separator: "\\n",
+  });
+  expect(result.item.chunking_mode).toBe("parent_child");
+  expect(result.accepted_document_count).toBe(2);
+  const [url, init] = fetchMock.mock.calls[0]!;
+  expect(url).toContain(`/bases/${base.id}/reparse`);
+  expect(init?.method).toBe("POST");
+  expect(typeof init?.body).toBe("string");
+  expect(JSON.parse(init?.body as string)).toMatchObject({
+    chunking_mode: "parent_child",
+    child_chunk_size: 300,
   });
 });
 

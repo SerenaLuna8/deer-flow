@@ -36,6 +36,33 @@ async def test_file_b_cannot_reuse_file_a_preview_before_any_row_or_object(postg
 
 
 @pytest.mark.asyncio
+async def test_old_adapter_preview_rejected_before_rows_or_objects(postgres_database_url, tmp_path):
+    harness = await _harness(postgres_database_url)
+    try:
+        project, base = await _seed_base(harness)
+        upload = _upload(tmp_path)
+        registry = default_registry()
+        current = resolve_processing_profile(harness.service._settings, ProcessingParameters(), registry, extension=".txt")
+        old_parse = current.parse.model_copy(update={"extractor_version": current.parse.extractor_version.replace(":adapter-v2:", ":adapter-v1:")})
+        assert old_parse != current.parse
+        old = current.model_copy(update={"parse": old_parse})
+        revision = build_file_capabilities(harness.service._settings, registry).capability_revision
+        fingerprint = preview_fingerprint(
+            source_sha256=hashlib.sha256(upload.source_path.read_bytes()).hexdigest(),
+            extension=".txt",
+            profile=old,
+            capability_revision=revision,
+        )
+        with pytest.raises(KnowledgeError) as error:
+            await harness.service.upload_document(project, base, replace(upload, expected_preview_fingerprint=fingerprint))
+        assert error.value.code == "KNOWLEDGE_CONFLICT"
+        assert await _table_counts(harness) == (0, 0)
+        assert harness.store.objects == {}
+    finally:
+        await harness.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_headless_upload_and_retry_keep_original_profile_after_etl_changes(postgres_database_url, tmp_path):
     harness = await _harness(postgres_database_url)
     try:

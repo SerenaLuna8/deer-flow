@@ -239,9 +239,19 @@ secondary controls are sibling buttons outside the link.
   any probe failure hides it. Reads require `shared_assets.read`; create, edit,
   upload, retry, and delete controls require `shared_assets.edit`.
 - Base cards present the saved retrieval mode, status, description, document
-  count, and relative update time. Unconfigured bases show their setup state;
-  document-level chunk modes are never inferred as base-wide metadata.
+  count, and relative update time. Unconfigured bases show their setup state.
   Cards cap at 24rem and wrap to the available width instead of stretching.
+- The chunking mode is base-level authority: `KnowledgeBaseItem.chunking_mode`
+  (nullable, strict) is fixed by the first upload and null while the base has
+  no live document. The wizard for an existing base and the document chunk
+  settings page render `KnowledgeChunkSettingsFields` with `lockedMode`, so
+  both radios are disabled and the note names the only switch; a document
+  still on another mode is pre-filled with the base's and its row shows a
+  mismatch hint. Settings own the switch: the "Chunking mode" section opens
+  `knowledge-base-reparse-dialog.tsx`, which posts one parameter set to
+  `POST .../bases/{id}/reparse`, shows the server's accepted count, and keeps
+  the form with the server message when the all-or-nothing admission refuses.
+  Never derive a base mode from its document rows in the browser.
 - On desktop, the in-base menu stays sticky while section content scrolls;
   short windows let the menu scroll within the available viewport height.
 - `core/knowledge/` owns the strict contracts, query keys, and hooks, with its
@@ -258,6 +268,14 @@ secondary controls are sibling buttons outside the link.
   snapshot, scope generation, and request sequence so a late response can never
   overwrite the current winner. Multi-file submission reports one verdict per
   file and retries only failed files with the frozen settings.
+- New upload, existing upload, and reparse explain that Knowledge Tokens are a
+  fixed local chunking unit, not the selected Embedding model's input capacity,
+  and that preview does not validate model capacity. They describe overlap as a
+  bounded maximum within supported structural boundaries. Profile rejection
+  keeps unsaved Segment editor input open and never auto-reparses or reconstructs
+  parser authority in the browser. These explanations do not alter defaults,
+  payloads, or preview identity; processing facts remain warning-only, and the
+  internal metadata/version rows stay removed.
 - Empty-base creation submits only name/description with
   `embedding_model_id: null` and never silently chooses a model. An
   unconfigured base is configured once by PATCH before its first upload;

@@ -57,6 +57,7 @@ import type {
 import type { ProjectClientScope } from "@/core/private-work/types";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeBaseReparseDialog } from "./knowledge-base-reparse-dialog";
 import { KnowledgeBaseSetupDialog } from "./knowledge-base-setup-dialog";
 import { KnowledgeDocumentsView } from "./knowledge-documents-view";
 import { knowledgeErrorMessage } from "./knowledge-error";
@@ -440,7 +441,10 @@ function KnowledgeBaseSettingsPanel({
           </div>
         </section>
       ) : (
-        <KnowledgeRebuildSection scope={scope} base={base} />
+        <>
+          <KnowledgeRebuildSection scope={scope} base={base} />
+          <KnowledgeChunkingModeSection scope={scope} base={base} />
+        </>
       )}
 
       <KnowledgeBaseSetupDialog
@@ -779,6 +783,83 @@ function KnowledgeRebuildSection({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </section>
+  );
+}
+
+/**
+ * The base-wide chunking mode: fixed by the first upload, shared by every
+ * document, and switched only through the base-wide reparse. An undetermined
+ * (empty) base offers no switch — its next upload decides.
+ */
+function KnowledgeChunkingModeSection({
+  scope,
+  base,
+}: {
+  scope: ProjectClientScope;
+  base: KnowledgeBaseItem;
+}) {
+  const { t } = useI18n();
+  const labels = t.knowledge;
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [acceptedCount, setAcceptedCount] = useState<number | null>(null);
+  const modeLabel =
+    base.chunking_mode === null
+      ? labels.bases.chunkingModeUndetermined
+      : base.chunking_mode === "parent_child"
+        ? labels.documents.chunkingModeParentChild
+        : labels.documents.chunkingModeGeneral;
+
+  return (
+    <section
+      aria-label={labels.bases.chunkingModeSectionTitle}
+      className="grid gap-3 pt-8 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6"
+    >
+      <h3 className="text-[13px] font-medium sm:pt-2.5">
+        {labels.bases.chunkingModeSectionTitle}
+      </h3>
+      <div className="w-full max-w-[820px] min-w-0 space-y-3">
+        <div className="flex min-w-0 flex-col gap-2 xl:flex-row xl:items-center">
+          <p
+            className="bg-muted/60 min-w-0 flex-1 rounded-lg px-3 py-2 text-[13px]"
+            data-testid="knowledge-base-chunking-mode"
+          >
+            {modeLabel}
+          </p>
+          <Button
+            className="border-border/70 h-9 shrink-0 rounded-lg text-[13px] shadow-none"
+            type="button"
+            variant="outline"
+            disabled={base.chunking_mode === null}
+            onClick={() => {
+              setAcceptedCount(null);
+              setDialogOpen(true);
+            }}
+          >
+            {labels.bases.switchChunkingModeButton}
+          </Button>
+        </div>
+        <p className="text-muted-foreground text-xs leading-5">
+          {labels.bases.chunkingModeHint}
+        </p>
+        {acceptedCount !== null ? (
+          <p
+            role="status"
+            className="text-success text-[13px]"
+            data-testid="knowledge-base-reparse-outcome"
+          >
+            {labels.bases.reparseBaseOutcome(acceptedCount)}
+          </p>
+        ) : null}
+      </div>
+      {dialogOpen ? (
+        <KnowledgeBaseReparseDialog
+          scope={scope}
+          base={base}
+          onClose={() => setDialogOpen(false)}
+          onAccepted={setAcceptedCount}
+        />
+      ) : null}
     </section>
   );
 }

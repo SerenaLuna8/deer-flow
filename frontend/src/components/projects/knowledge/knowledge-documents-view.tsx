@@ -911,6 +911,17 @@ function DocumentsTable({
                         ? labels.documents.chunkingModeParentChild
                         : labels.documents.chunkingModeGeneral}
                     </span>
+                    {base.chunking_mode !== null &&
+                    document.chunking_mode !== base.chunking_mode ? (
+                      // Admitted before a base-wide switch: its published rows
+                      // still carry the old mode until it is re-parsed.
+                      <span
+                        className="block text-xs leading-4 text-amber-700 dark:text-amber-300"
+                        data-testid="knowledge-chunking-mode-mismatch"
+                      >
+                        {labels.documents.chunkingModeMismatch}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="px-3 py-3 text-right leading-5 tabular-nums @4xl:px-4">
                     {document.word_count.toLocaleString(locale)}

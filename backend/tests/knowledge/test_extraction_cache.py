@@ -58,6 +58,22 @@ async def test_cache_preserves_pages_warnings_occurrences_without_second_put(pos
 
 
 @pytest.mark.asyncio
+async def test_adapter_version_misses_ready_cache_without_deleting_current_result(postgres_database_url):
+    async with extraction_harness(postgres_database_url) as h:
+        reservation, result, profile = await prepared(h)
+        stored = await h.store.complete(reservation, result)
+        before = await quota_state(h)
+        old = profile.model_copy(update={"extractor_version": profile.extractor_version.replace(":adapter-v2:", ":adapter-v1:")})
+        assert old != profile
+        assert await find(h, result, old) is None
+        assert await find(h, result, profile) == stored
+        assert await quota_state(h) == before
+        rows = await h.read_rows()
+        assert len(rows["extractions"]) == 1
+        assert rows["extractions"][0].state == "ready"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("axis", ["source", "extractor_version", "header_rules", "disabled", "chunk"])
 async def test_cache_identity_axes(postgres_database_url, axis):
     async with extraction_harness(postgres_database_url) as h:

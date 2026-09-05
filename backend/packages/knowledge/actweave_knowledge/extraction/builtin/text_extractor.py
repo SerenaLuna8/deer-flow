@@ -8,6 +8,7 @@ from typing import override
 from ..base import BaseExtractor
 from ..contracts import Document, ExtractionContext, ExtractSetting, SourceSpan
 from ..encoding import decode_text_file, source_lines
+from ..literal import escape_literal_text
 
 
 class TextExtractor(BaseExtractor):
@@ -19,9 +20,12 @@ class TextExtractor(BaseExtractor):
         context.check_cancelled()
         text, encoding, warnings = decode_text_file(setting.source_path)
         spans = []
+        parts = []
         offset = 0
         for number, line in enumerate(source_lines(text), 1):
-            spans.append(SourceSpan(block_id=f"line:{number}", start=offset, end=offset + len(line), location={"line": number, "encoding": encoding}))
-            offset += len(line)
+            rendered = escape_literal_text(line)
+            spans.append(SourceSpan(block_id=f"line:{number}", start=offset, end=offset + len(rendered), location={"line": number, "encoding": encoding}))
+            parts.append(rendered)
+            offset += len(rendered)
         context.check_cancelled()
-        return [Document(page_content=text, source_spans=tuple(spans), kind="text", warnings=warnings)]
+        return [Document(page_content="".join(parts), source_spans=tuple(spans), kind="text", warnings=warnings)]

@@ -1,29 +1,6 @@
-"""Trigger filter logic for GitHub webhook dispatch.
+"""Pure GitHub event filters for trigger configurations supplied by callers.
 
-Pure functions, no I/O. Given an event name, its payload, and the
-agent-config's per-event trigger overrides, decide whether to fire the
-agent and why (the reason string makes the gateway log line useful).
-
-**Events are opt-in per binding.** If an event name does not appear as a
-key in the binding's ``triggers:`` mapping, the agent is **not registered**
-for that event — the dispatcher never even loads the agent for it. The
-agent's ``config.yaml`` is the single source of truth for "which events
-do I care about?".
-
-:data:`DEFAULT_TRIGGERS` still exists, but it is no longer an
-event-enablement list. It is the per-event **field-level defaults** that
-get merged into the binding's override when an event IS listed. So:
-
-* ``issue_comment: {}`` → registers the agent for ``issue_comment`` and
-  inherits ``require_mention: True`` from the default. (Same shape as
-  before — minimal config, sensible defaults.)
-* Binding omits ``issue_comment`` entirely → the agent does **not** see
-  ``issue_comment`` events at all. (New behavior.)
-
-Trigger override merge is field-wise via Pydantic's ``exclude_unset``:
-fields the binding explicitly set win; fields it omitted fall back to
-the default. Fields with no default (``DEFAULT_TRIGGERS[event]`` is
-``None``) just use the binding's literal value.
+The registry currently returns no bindings until project-scoped lookup exists.
 """
 
 from __future__ import annotations
@@ -32,22 +9,6 @@ import re
 from typing import Any
 
 from deerflow.config.agents_config import GitHubTriggerConfig
-
-# Per-event field-level defaults. These are merged into a binding's
-# override when the event IS listed in the binding's ``triggers:``. They
-# no longer enable the event by themselves — the binding must list the
-# event for the agent to register for it.
-#
-# ``None`` means "no per-event defaults; use whatever the binding set
-# (or the model's own field defaults)".
-DEFAULT_TRIGGERS: dict[str, GitHubTriggerConfig | None] = {
-    "ping": None,
-    "issues": None,
-    "pull_request_review": None,
-    "pull_request": GitHubTriggerConfig(actions=["opened"]),
-    "issue_comment": GitHubTriggerConfig(require_mention=True),
-    "pull_request_review_comment": GitHubTriggerConfig(require_mention=True),
-}
 
 
 def _action(payload: dict[str, Any]) -> str | None:
@@ -94,40 +55,6 @@ def _author_login(event: str, payload: dict[str, Any]) -> str | None:
     return login if isinstance(login, str) else None
 
 
-def _resolved_trigger(
-    event: str,
-    binding_triggers: dict[str, GitHubTriggerConfig],
-) -> GitHubTriggerConfig | None:
-    """Merge the binding's override with per-event field defaults.
-
-    Returns ``None`` if the binding does not list the event at all — the
-    event is opt-in per binding.
-
-    Otherwise, returns a ``GitHubTriggerConfig`` where:
-    * fields the binding explicitly set win,
-    * fields the binding omitted fall back to ``DEFAULT_TRIGGERS[event]``,
-    * and if there is no per-event default the binding's own field
-      defaults (from the Pydantic model) apply.
-
-    Detection of "explicitly set" relies on Pydantic's
-    ``model_fields_set`` — fields not present in the source YAML aren't
-    counted as set.
-    """
-    override = binding_triggers.get(event)
-    if override is None:
-        return None
-
-    default = DEFAULT_TRIGGERS.get(event)
-    if default is None:
-        return override
-
-    # Field-wise merge: take fields the binding explicitly set,
-    # backfill the rest from the per-event default.
-    explicit = override.model_dump(exclude_unset=True)
-    merged = default.model_copy(update=explicit)
-    return merged
-
-
 def _mentions(body: str, login: str) -> bool:
     """Return True if ``body`` @-mentions ``login`` with proper boundaries.
 
@@ -158,11 +85,7 @@ def event_should_fire(
     Args:
         event: GitHub event name (``X-GitHub-Event``).
         payload: Parsed webhook payload.
-        trigger: Pre-resolved trigger config for this ``(repo, event)``.
-            The caller (registry) has already merged the binding override
-            with per-event :data:`DEFAULT_TRIGGERS` field defaults, so this
-            function does not look the event up in any dict — it just
-            applies the gates the trigger declares.
+        trigger: Trigger configuration whose declared gates are applied as-is.
         default_mention_login: Bot login (without ``@``) used by
             ``require_mention`` when the trigger doesn't override
             ``mention_login``. Pass the agent name as a fallback.

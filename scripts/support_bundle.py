@@ -283,36 +283,6 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError("Invalid thread_id")
 
 
-def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
-    if not root.exists():
-        return []
-    entries: list[dict[str, Any]] = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if len(entries) >= max_files:
-            entries.append(
-                {"path": "<truncated>", "reason": f"file limit {max_files} reached"}
-            )
-            break
-        try:
-            stat = path.stat()
-        except OSError as exc:
-            entries.append(
-                {
-                    "path": redact_text(path.relative_to(root).as_posix()),
-                    "error": redact_text(f"{type(exc).__name__}: {exc}"),
-                }
-            )
-            continue
-        entries.append(
-            {
-                "path": redact_text(path.relative_to(root).as_posix()),
-                "size_bytes": stat.st_size,
-                "mtime": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-            }
-        )
-    return entries
-
-
 def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]:
     """Reject legacy thread-only manifests without project and owner scope."""
 

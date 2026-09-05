@@ -484,15 +484,6 @@ function projectInvitationsUrl(path = ""): string {
   return `${getBackendBaseURL()}/api/project-invitations${path}`;
 }
 
-export async function listMyProjectInvitations(
-  signal?: AbortSignal,
-): Promise<ProjectInvitation[]> {
-  return parseResponse(
-    await request(projectInvitationsUrl("/mine"), { signal }),
-    projectInvitationListSchema,
-  );
-}
-
 export async function listProjectInvitations(
   projectId: string,
   signal?: AbortSignal,

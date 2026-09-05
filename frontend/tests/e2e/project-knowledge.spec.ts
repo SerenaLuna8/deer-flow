@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import { enUS, zhCN } from "@/core/i18n/locales";
 import type { Capability, Project } from "@/core/projects/types";
 
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
@@ -281,6 +282,11 @@ type MockBase = {
   reranker_model_id?: string | null;
   retrieval_mode?: "semantic" | "hybrid";
   summary_index_enabled?: boolean;
+  /**
+   * Base-wide chunking mode. Omitted derives it from the base's first live
+   * mock document (null without one), like the real projection.
+   */
+  chunking_mode?: "general" | "parent_child" | null;
   /** deleting bases disappear after this many further list polls */
   pollsUntilGone?: number;
 };
@@ -374,7 +380,10 @@ type MockQuery = {
   top_score: number | null;
 };
 
-function baseView(base: MockBase) {
+function baseView(base: MockBase, documents: MockDocument[] = []) {
+  const liveDocument = documents.find(
+    (item) => item.knowledge_base_id === base.id && item.status !== "deleting",
+  );
   return {
     id: base.id,
     project_id: PROJECT_ID,
@@ -392,6 +401,12 @@ function baseView(base: MockBase) {
     default_top_k: base.default_top_k ?? 4,
     default_score_threshold: base.default_score_threshold ?? 0,
     default_relative_cutoff: null,
+    chunking_mode:
+      base.chunking_mode !== undefined
+        ? base.chunking_mode
+        : liveDocument
+          ? (liveDocument.chunking_mode ?? "general")
+          : null,
     delete_error: base.delete_error,
     created_at: TIMESTAMP,
     updated_at: TIMESTAMP,
@@ -700,6 +715,7 @@ async function mockKnowledgeRoutes(
       message: string;
     },
     rebuildRequests: [] as Array<Record<string, unknown>>,
+    baseReparseRequests: [] as Array<Record<string, unknown>>,
     metadataUpdates: [] as Array<Record<string, unknown>>,
     batchMetadataRequests: [] as Array<{
       document_ids: string[];
@@ -820,7 +836,10 @@ async function mockKnowledgeRoutes(
           }
         }
       }
-      return json(route, listPayload(state.bases.map(baseView)));
+      return json(
+        route,
+        listPayload(state.bases.map((base) => baseView(base, state.documents))),
+      );
     }
     if (path === `${knowledgeBase}/bases` && method === "POST") {
       const body = request.postDataJSON() as {
@@ -920,7 +939,7 @@ async function mockKnowledgeRoutes(
       }
       await options.baseUpdateResponseGate;
       return json(route, {
-        item: baseView(base),
+        item: baseView(base, state.documents),
         summary_backfill: summaryBackfill,
         request_id: "req-update",
       });
@@ -941,7 +960,10 @@ async function mockKnowledgeRoutes(
           : null;
       base.status = "deleting";
       base.pollsUntilGone = base.delete_error ? undefined : 1;
-      return json(route, { item: baseView(base), request_id: "req-delete" });
+      return json(route, {
+        item: baseView(base, state.documents),
+        request_id: "req-delete",
+      });
     }
 
     const queriesMatch = /\/bases\/([0-9a-f-]{36})\/queries$/u.exec(path);
@@ -1075,10 +1097,59 @@ async function mockKnowledgeRoutes(
         acceptedCount += 1;
       }
       return json(route, {
-        item: baseView(base),
+        item: baseView(base, state.documents),
         accepted_document_count: acceptedCount,
         skipped_document_ids: skippedIds,
         request_id: "req-rebuild",
+      });
+    }
+
+    const baseReparseMatch = /\/bases\/([0-9a-f-]{36})\/reparse$/u.exec(path);
+    if (baseReparseMatch && method === "POST") {
+      const base = state.bases.find((item) => item.id === baseReparseMatch[1]);
+      if (!base)
+        return knowledgeError(
+          route,
+          404,
+          "KNOWLEDGE_NOT_FOUND",
+          "知识库不存在",
+        );
+      const body = request.postDataJSON() as {
+        chunking_mode: "general" | "parent_child";
+      } & Record<string, unknown>;
+      state.baseReparseRequests.push(body);
+      const owned = state.documents.filter(
+        (item) =>
+          item.knowledge_base_id === base.id && item.status !== "deleting",
+      );
+      // All-or-nothing, like the real admission: any in-flight document
+      // refuses the whole switch.
+      const blocking = owned.filter(
+        (item) => item.status !== "ready" && item.status !== "failed",
+      );
+      if (blocking.length > 0) {
+        return knowledgeError(
+          route,
+          400,
+          "KNOWLEDGE_INVALID_REQUEST",
+          `存在 ${blocking[0]!.status} 状态的文档，请等待处理完成后再整库重新解析`,
+        );
+      }
+      base.chunking_mode = body.chunking_mode;
+      for (const item of owned) {
+        item.version = (item.version ?? 1) + 1;
+        item.status = "queued";
+        item.error_message = null;
+        item.progression = ["processing", "ready"];
+        // Published rows adopt the new mode when the generation publishes;
+        // the mock applies it at admission for a deterministic list.
+        item.chunking_mode = body.chunking_mode;
+      }
+      return json(route, {
+        item: baseView(base, state.documents),
+        accepted_document_count: owned.length,
+        skipped_document_ids: [],
+        request_id: "req-base-reparse",
       });
     }
 
@@ -4198,6 +4269,8 @@ test("an existing configured base uploads through the wizard without changing it
         status: "ready",
         segment_count: 2,
         content_initialized: true,
+        chunking_mode: "parent_child",
+        child_chunk_size: 400,
         error_message: null,
         delete_error: null,
       },
@@ -4238,7 +4311,19 @@ test("an existing configured base uploads through the wizard without changing it
   await wizard
     .getByLabel("Display name (optional)", { exact: true })
     .fill("Uploaded guide");
-  await wizard.getByRole("radio", { name: /Parent-child/u }).check();
+  // The base's first document fixed its chunking mode: the wizard arrives on
+  // parent-child with both mode radios locked, while the parameters inside
+  // the mode stay this document's own choice.
+  await expect(
+    wizard.getByTestId("knowledge-chunking-mode-locked"),
+  ).toContainText("locked to Parent-child");
+  await expect(
+    wizard.getByRole("radio", { name: /Parent-child/u }),
+  ).toBeChecked();
+  await expect(
+    wizard.getByRole("radio", { name: /Parent-child/u }),
+  ).toBeDisabled();
+  await expect(wizard.getByRole("radio", { name: /General/u })).toBeDisabled();
   await wizard
     .getByLabel("Child chunk size (Knowledge Tokens)", { exact: true })
     .fill("200");
@@ -5160,6 +5245,220 @@ test("settings rebuild confirms, posts the configuration, and documents reproces
   await expect(
     rows.getByRole("row").filter({ hasText: "never-published.txt" }),
   ).toContainText("Failed");
+});
+
+test("the base's chunking mode is switched only through the base-wide reparse in settings", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "锁定模式知识库",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "guide.txt",
+        original_name: "guide.txt",
+        status: "ready",
+        segment_count: 3,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: "failed.txt",
+        original_name: "failed.txt",
+        status: "failed",
+        segment_count: 0,
+        content_initialized: false,
+        error_message: "解析失败",
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${BASE_ID}&view=settings`);
+
+  // The section states the mode the first document fixed and offers exactly
+  // one way out: the base-wide reparse.
+  const section = page.getByRole("region", { name: "Chunking mode" });
+  await expect(section.getByTestId("knowledge-base-chunking-mode")).toHaveText(
+    "General",
+  );
+  await expect(section).toContainText(
+    "Every document in a base shares one chunking mode.",
+  );
+  await section.getByRole("button", { name: "Switch chunking mode" }).click();
+  const dialog = page.getByTestId("knowledge-base-reparse-dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "Re-parse all documents" }),
+  ).toBeVisible();
+  await expect(dialog).toContainText(
+    'Re-parses all 2 documents of "锁定模式知识库"',
+  );
+  await expect(dialog).toContainText(
+    "Each document's own chunk settings, manual segment edits, and per-segment disables are overwritten",
+  );
+  // It opens on the other mode with the wizard defaults; both modes stay
+  // selectable here because this is the switch itself.
+  await expect(
+    dialog.getByRole("radio", { name: /Parent-child/u }),
+  ).toBeChecked();
+  await expect(dialog.getByRole("radio", { name: /General/u })).toBeEnabled();
+  await expect(
+    dialog.getByLabel("Child chunk size (Knowledge Tokens)"),
+  ).toHaveValue("500");
+  await dialog.getByLabel("Child chunk size (Knowledge Tokens)").fill("300");
+  await dialog
+    .getByLabel("Chunk size (Knowledge Tokens)", { exact: true })
+    .fill("800");
+  await dialog
+    .getByRole("button", { name: "Re-parse all", exact: true })
+    .click();
+  await expect(dialog).toBeHidden();
+  expect(state.baseReparseRequests).toEqual([
+    {
+      chunk_size: 800,
+      chunk_overlap: 100,
+      chunk_separator: "\\n\\n",
+      remove_extra_spaces: false,
+      remove_urls_emails: false,
+      chunking_mode: "parent_child",
+      child_chunk_size: 300,
+      child_chunk_separator: "\\n",
+    },
+  ]);
+  // The real accepted count, then the refreshed base shows the new mode.
+  await expect(page.getByTestId("knowledge-base-reparse-outcome")).toHaveText(
+    "Re-parsing accepted for 2 documents; they are excluded from retrieval while they process.",
+  );
+  await expect(section.getByTestId("knowledge-base-chunking-mode")).toHaveText(
+    "Parent-child",
+  );
+
+  // Every document re-queued and walks back to ready under the new mode; the
+  // per-document chunk settings page is now locked to it as well.
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
+  const rows = page.getByTestId("knowledge-document-rows");
+  for (const name of ["guide.txt", "failed.txt"]) {
+    await expect(rows.getByRole("row").filter({ hasText: name })).toContainText(
+      "Ready",
+      { timeout: 15_000 },
+    );
+    await expect(rows.getByRole("row").filter({ hasText: name })).toContainText(
+      "Parent-child",
+    );
+  }
+  await page.getByRole("button", { name: "Actions for guide.txt" }).click();
+  await page.getByRole("menuitem", { name: "Chunk settings" }).click();
+  const settings = page.getByTestId("knowledge-document-chunk-settings");
+  await expect(
+    settings.getByTestId("knowledge-chunking-mode-locked"),
+  ).toContainText("locked to Parent-child");
+  await expect(
+    settings.getByRole("radio", { name: /Parent-child/u }),
+  ).toBeChecked();
+  await expect(
+    settings.getByRole("radio", { name: /General/u }),
+  ).toBeDisabled();
+});
+
+test("a base-wide reparse is refused while a document is still processing, and stale documents are flagged", async ({
+  page,
+}) => {
+  const BASE_ID = "40000000-0000-4000-8000-000000000001";
+  const state = await mockKnowledgeRoutes(page, {
+    bases: [
+      {
+        id: BASE_ID,
+        name: "处理中知识库",
+        description: "",
+        status: "active",
+        document_count: 2,
+        delete_error: null,
+        // The base already switched to parent-child; one document admitted
+        // under the old mode still waits for its own reparse.
+        chunking_mode: "parent_child",
+      },
+    ],
+    documents: [
+      {
+        id: "50000000-0000-4000-8000-000000000001",
+        knowledge_base_id: BASE_ID,
+        name: "old-mode.txt",
+        original_name: "old-mode.txt",
+        status: "ready",
+        segment_count: 3,
+        content_initialized: true,
+        chunking_mode: "general",
+        error_message: null,
+        delete_error: null,
+      },
+      {
+        id: "50000000-0000-4000-8000-000000000002",
+        knowledge_base_id: BASE_ID,
+        name: "busy.txt",
+        original_name: "busy.txt",
+        status: "processing",
+        segment_count: 0,
+        content_initialized: false,
+        chunking_mode: "parent_child",
+        error_message: null,
+        delete_error: null,
+      },
+    ],
+  });
+  await page.goto(`/projects/alpha/knowledge?kb=${BASE_ID}`);
+  const rows = page.getByTestId("knowledge-document-rows");
+  await expect(
+    rows
+      .getByRole("row")
+      .filter({ hasText: "old-mode.txt" })
+      .getByTestId("knowledge-chunking-mode-mismatch"),
+  ).toHaveText("Differs from the base's chunking mode; re-parse this document");
+  await expect(
+    rows
+      .getByRole("row")
+      .filter({ hasText: "busy.txt" })
+      .getByTestId("knowledge-chunking-mode-mismatch"),
+  ).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const section = page.getByRole("region", { name: "Chunking mode" });
+  await expect(section.getByTestId("knowledge-base-chunking-mode")).toHaveText(
+    "Parent-child",
+  );
+  await section.getByRole("button", { name: "Switch chunking mode" }).click();
+  const dialog = page.getByTestId("knowledge-base-reparse-dialog");
+  await expect(dialog.getByRole("radio", { name: /General/u })).toBeChecked();
+  await dialog
+    .getByRole("button", { name: "Re-parse all", exact: true })
+    .click();
+  // The server refuses the whole switch; the dialog keeps the form and shows
+  // the reason instead of pretending some documents were admitted.
+  await expect(dialog.getByRole("alert")).toContainText(
+    "存在 processing 状态的文档",
+  );
+  await expect(dialog).toBeVisible();
+  expect(state.baseReparseRequests).toHaveLength(1);
+  await expect(page.getByTestId("knowledge-base-reparse-outcome")).toHaveCount(
+    0,
+  );
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(section.getByTestId("knowledge-base-chunking-mode")).toHaveText(
+    "Parent-child",
+  );
 });
 
 test("the existing-base upload wizard accepts the K4 document formats", async ({
@@ -6766,7 +7065,15 @@ test("chunk settings open as a page that previews the current split, freezes edi
   await expect(
     settings.getByLabel("Chunk overlap (Knowledge Tokens)"),
   ).toHaveValue("100");
+  // The mode is the base's, fixed by its first document: shown, not offered.
   await expect(settings.getByRole("radio", { name: /General/ })).toBeChecked();
+  await expect(settings.getByRole("radio", { name: /General/ })).toBeDisabled();
+  await expect(
+    settings.getByRole("radio", { name: /Parent-child/ }),
+  ).toBeDisabled();
+  await expect(
+    settings.getByTestId("knowledge-chunking-mode-locked"),
+  ).toContainText("locked to General");
   const summary = settings.getByTestId("knowledge-base-configuration-summary");
   await expect(summary).toContainText(
     "Uses the base’s saved models and retrieval settings.",
@@ -7678,3 +7985,339 @@ test("a protected image response released after project scope disposal cannot cr
     revoked: [],
   });
 });
+
+for (const [locale, copy, guidance] of [
+  [
+    "en-US",
+    enUS.knowledge,
+    {
+      knowledgeTokenUnit:
+        "Knowledge Tokens are a fixed local chunking unit, not the input tokens of the selected Embedding model. Chunk previews do not validate model input limits; configure chunking according to the selected model and service limits.",
+      chunkOverlapHint:
+        "Retains at most the configured number of body-text Knowledge Tokens. Overlap does not cross page, heading, or table boundaries and may be smaller.",
+    },
+  ],
+  [
+    "zh-CN",
+    zhCN.knowledge,
+    {
+      knowledgeTokenUnit:
+        "“知识库 Token”是固定的本地分段单位，不等于所选 Embedding 模型的输入 Token。分段预览不校验模型输入上限；请结合所选模型和服务的限制配置分段。",
+      chunkOverlapHint:
+        "最多保留设定数量的正文 Token；不跨页面、标题或表格边界，实际重叠可能更少。",
+    },
+  ],
+] as const) {
+  for (const entry of ["new", "existing", "reparse"] as const) {
+    test(`RAG guidance ${locale} ${entry} preserves defaults and preview payload`, async ({
+      page,
+      baseURL,
+    }) => {
+      if (!baseURL) throw new Error("Playwright baseURL is required");
+      await page
+        .context()
+        .addCookies([{ name: "locale", value: locale, url: baseURL }]);
+      const baseId = "40000000-0000-4000-8000-000000000001";
+      const documentId = "50000000-0000-4000-8000-000000000001";
+      const base: MockBase = {
+        id: baseId,
+        name: "RAG guidance",
+        description: "",
+        status: "active",
+        document_count: entry === "reparse" ? 1 : 0,
+        delete_error: null,
+        embedding_model_id: MODEL_ID,
+      };
+      const document: MockDocument = {
+        id: documentId,
+        knowledge_base_id: baseId,
+        name: "guidance.txt",
+        original_name: "guidance.txt",
+        status: "ready",
+        segment_count: 1,
+        content_initialized: true,
+        error_message: null,
+        delete_error: null,
+      };
+      const state = await mockKnowledgeRoutes(page, {
+        bases: entry === "new" ? [] : [base],
+        documents: entry === "reparse" ? [document] : [],
+      });
+      await page.goto(
+        entry === "new"
+          ? "/projects/alpha/knowledge"
+          : `/projects/alpha/knowledge?kb=${baseId}`,
+      );
+
+      if (entry === "reparse") {
+        await page
+          .getByRole("button", {
+            name: copy.documents.actionsAria(document.name),
+            exact: true,
+          })
+          .click();
+        await page
+          .getByRole("menuitem", {
+            name: copy.documents.chunkSettings,
+            exact: true,
+          })
+          .click();
+      } else {
+        if (entry === "new") {
+          await page
+            .getByText(copy.wizard.uploadCreateTitle, { exact: true })
+            .click();
+        } else {
+          await page
+            .getByRole("button", {
+              name: copy.documents.uploadButton,
+              exact: true,
+            })
+            .click();
+        }
+        await page
+          .getByLabel(copy.documents.fileLabel, { exact: true })
+          .setInputFiles({
+            name: "guidance.txt",
+            mimeType: "text/plain",
+            buffer: Buffer.from("RAG guidance fixture"),
+          });
+        await page
+          .getByRole("button", {
+            name: copy.wizard.next,
+            exact: true,
+          })
+          .click();
+      }
+
+      const form =
+        entry === "reparse"
+          ? page.getByTestId("knowledge-document-chunk-settings")
+          : page.getByTestId("knowledge-create-wizard");
+      await expect(
+        form.getByText(guidance.knowledgeTokenUnit, { exact: true }),
+      ).toBeVisible();
+      await expect(
+        form.getByText(guidance.chunkOverlapHint, { exact: true }),
+      ).toBeVisible();
+      await expect(
+        form.getByLabel(copy.wizard.chunkSizeTokenLabel, { exact: true }),
+      ).toHaveValue("1000");
+      const overlap = form.getByLabel(copy.wizard.chunkOverlapTokenLabel, {
+        exact: true,
+      });
+      await expect(overlap).toHaveValue("100");
+      await expect(overlap).toHaveAccessibleDescription(
+        guidance.chunkOverlapHint,
+      );
+      await expect(
+        form.getByLabel(copy.documents.chunkSeparatorLabel, { exact: true }),
+      ).toHaveValue("\\n\\n");
+
+      if (entry === "reparse") {
+        await expect(form).toContainText(copy.documents.reparseWarning);
+        await expect.poll(() => state.reparsePreviewRequests.length).toBe(1);
+        expect(state.reparsePreviewRequests[0]).toEqual({
+          expected_version: 1,
+          chunk_size: 1000,
+          chunk_overlap: 100,
+          chunk_separator: "\\n\\n",
+          remove_extra_spaces: false,
+          remove_urls_emails: false,
+          chunking_mode: "general",
+        });
+        await form
+          .getByRole("button", {
+            name: copy.documents.reparseSubmit,
+            exact: true,
+          })
+          .click();
+        await expect.poll(() => state.reparseRequests.length).toBe(1);
+        expect(state.reparseRequests[0]).toEqual(
+          state.reparsePreviewRequests[0],
+        );
+      } else {
+        await expect.poll(() => state.previewProcessingRequests.length).toBe(1);
+        const preview = state.previewProcessingRequests[0]!;
+        expect(preview.profile).toEqual({
+          unit: "token",
+          mode: "general",
+          size: 1000,
+          overlap: 100,
+          separator: "\\n\\n",
+          child_size: 500,
+          child_separator: "\\n",
+          remove_extra_spaces: false,
+          remove_urls_emails: false,
+          header_rules: [],
+        });
+        await expect(form.getByTestId("chunk-preview-panel")).toContainText(
+          copy.wizard.previewHint("guidance.txt"),
+        );
+        if (entry === "new") {
+          await form
+            .getByRole("combobox", { name: copy.bases.modelLabel, exact: true })
+            .click();
+          await page
+            .getByRole("option", {
+              name: "SiliconFlow · BAAI/bge-m3",
+              exact: true,
+            })
+            .click();
+        }
+        await form
+          .getByRole("button", {
+            name:
+              entry === "new"
+                ? copy.wizard.saveAndProcess
+                : copy.wizard.uploadAction,
+            exact: true,
+          })
+          .click();
+        await expect.poll(() => state.uploadProcessingRequests.length).toBe(1);
+        expect(state.uploadProcessingRequests[0]).toEqual({
+          fileName: "guidance.txt",
+          profile: preview.profile,
+          expectedFingerprint: preview.fingerprint,
+        });
+        if (entry === "existing") {
+          expect(state.baseCreates).toEqual([]);
+          expect(state.baseUpdates).toEqual([]);
+        }
+      }
+    });
+  }
+}
+
+for (const [locale, copy] of [
+  ["en-US", enUS.knowledge],
+  ["zh-CN", zhCN.knowledge],
+] as const) {
+  for (const operation of ["add", "edit"] as const) {
+    test(`RAG legacy edit ${locale} ${operation} keeps unsaved content without reparse`, async ({
+      page,
+      baseURL,
+    }) => {
+      if (!baseURL) throw new Error("Playwright baseURL is required");
+      await page
+        .context()
+        .addCookies([{ name: "locale", value: locale, url: baseURL }]);
+      const baseId = "40000000-0000-4000-8000-000000000001";
+      const documentId = "50000000-0000-4000-8000-000000000001";
+      const segmentId = "60000000-0000-4000-8000-000000000001";
+      const original = "原有父段内容";
+      const message = "原解析配置已不可用，请显式重新解析";
+      const state = await mockKnowledgeRoutes(page, {
+        bases: [
+          {
+            id: baseId,
+            name: "Legacy profile",
+            description: "",
+            status: "active",
+            document_count: 1,
+            delete_error: null,
+            embedding_model_id: MODEL_ID,
+          },
+        ],
+        documents: [
+          {
+            id: documentId,
+            knowledge_base_id: baseId,
+            name: "legacy.txt",
+            original_name: "legacy.txt",
+            status: "ready",
+            segment_count: 1,
+            content_initialized: true,
+            error_message: null,
+            delete_error: null,
+            chunk_size_unit: "token",
+            chunking_mode: "parent_child",
+            parsing_profile: {
+              ...PROCESSING_PROFILE,
+              chunk: {
+                ...PROCESSING_PROFILE.chunk,
+                unit: "token",
+                mode: "parent_child",
+                splitter_version: "splitter-v2",
+              },
+            },
+          },
+        ],
+        segments: {
+          [documentId]: [
+            {
+              id: segmentId,
+              position: 1,
+              content: original,
+              enabled: true,
+              source_position: { page: 1 },
+            },
+          ],
+        },
+      });
+      const rejected: Array<Record<string, unknown>> = [];
+      const path =
+        operation === "add"
+          ? `/api/projects/${PROJECT_ID}/knowledge/documents/${documentId}/segments`
+          : `/api/projects/${PROJECT_ID}/knowledge/segments/${segmentId}`;
+      await page.route(`**${path}`, async (route) => {
+        const request = route.request();
+        if (request.method() !== (operation === "add" ? "POST" : "PATCH")) {
+          await route.fallback();
+          return;
+        }
+        rejected.push(request.postDataJSON() as Record<string, unknown>);
+        await knowledgeError(route, 422, "KNOWLEDGE_PARSE_FAILED", message);
+      });
+      await page.goto(
+        `/projects/alpha/knowledge?kb=${baseId}&doc=${documentId}`,
+      );
+      const browser = page.getByTestId("knowledge-segment-browser");
+      const list = browser.getByTestId("knowledge-segment-list");
+      await expect(list.getByText(original, { exact: true })).toBeVisible();
+      if (operation === "add") {
+        await browser
+          .getByRole("button", { name: copy.segments.add, exact: true })
+          .click();
+      } else {
+        await list
+          .getByRole("listitem")
+          .filter({ hasText: original })
+          .getByRole("button", { name: copy.segments.edit, exact: true })
+          .click();
+      }
+      const sheet = page.getByRole("dialog");
+      const buffer = "  未保存的正文\n第二行  ";
+      await sheet.getByLabel(copy.segments.contentLabel).fill(buffer);
+      await sheet
+        .getByRole("button", { name: copy.common.save, exact: true })
+        .click();
+      await expect(sheet.getByRole("alert")).toHaveText(message);
+      await expect(sheet).toBeVisible();
+      await expect(sheet.getByLabel(copy.segments.contentLabel)).toHaveValue(
+        buffer,
+      );
+      expect(rejected).toEqual([{ content: buffer.trim() }]);
+      await expect(
+        sheet.getByRole("button", { name: copy.common.save, exact: true }),
+      ).toBeEnabled();
+      await sheet
+        .getByLabel(copy.segments.contentLabel)
+        .fill(`${buffer}继续编辑`);
+      await expect(sheet.getByLabel(copy.segments.contentLabel)).toHaveValue(
+        `${buffer}继续编辑`,
+      );
+      expect(state.reparseRequests).toEqual([]);
+      expect(state.reparsePreviewRequests).toEqual([]);
+      expect(
+        state.segments.get(documentId)?.map((item) => item.content),
+      ).toEqual([original]);
+      expect(state.documents[0]?.status).toBe("ready");
+      await sheet
+        .getByRole("button", { name: copy.common.cancel, exact: true })
+        .click();
+      await expect(sheet).toHaveCount(0);
+      await expect(list.getByText(original, { exact: true })).toBeVisible();
+    });
+  }
+}

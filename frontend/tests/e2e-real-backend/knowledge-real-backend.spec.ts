@@ -1408,10 +1408,26 @@ test("re-embedding keeps segment identity, edits, and disables; reparse replaces
     .getByRole("menuitem", { name: "Chunk settings" })
     .click();
   const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  const reparsePreview = chunkSettings.getByTestId("knowledge-reparse-preview");
+  await expect(
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 30_000 });
   await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await chunkSettings
-    .getByRole("button", { name: "Refresh preview", exact: true })
-    .click();
+  const [previewResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response
+          .url()
+          .endsWith(
+            `/projects/${project.id}/knowledge/documents/${documentId}/reparse-preview`,
+          ) && response.request().method() === "POST",
+    ),
+    chunkSettings
+      .getByRole("button", { name: "Refresh preview", exact: true })
+      .click(),
+  ]);
+  expect(previewResponse.status(), "unexpected HTTP status").toBe(200);
+  await expect(reparsePreview).toHaveAttribute("aria-busy", "false");
   await expect(
     chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 30_000 });
@@ -1713,10 +1729,26 @@ test("summary indexing retries without hiding ready content, caches queries, and
     .getByRole("menuitem", { name: "Chunk settings" })
     .click();
   const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  const reparsePreview = chunkSettings.getByTestId("knowledge-reparse-preview");
+  await expect(
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 30_000 });
   await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await chunkSettings
-    .getByRole("button", { name: "Refresh preview", exact: true })
-    .click();
+  const [previewResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response
+          .url()
+          .endsWith(
+            `/projects/${project.id}/knowledge/documents/${reembeddedDocument.id}/reparse-preview`,
+          ) && response.request().method() === "POST",
+    ),
+    chunkSettings
+      .getByRole("button", { name: "Refresh preview", exact: true })
+      .click(),
+  ]);
+  expect(previewResponse.status(), "unexpected HTTP status").toBe(200);
+  await expect(reparsePreview).toHaveAttribute("aria-busy", "false");
   await expect(
     chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 30_000 });
@@ -2012,10 +2044,26 @@ test("the P1 image fixture keeps preview ephemeral, pins image reads, reprocesse
     .getByRole("menuitem", { name: "Chunk settings" })
     .click();
   const chunkSettings = page.getByTestId("knowledge-document-chunk-settings");
+  const reparsePreview = chunkSettings.getByTestId("knowledge-reparse-preview");
+  await expect(
+    chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
+  ).toBeVisible({ timeout: 45_000 });
   await chunkSettings.getByLabel("Chunk size (Knowledge Tokens)").fill("500");
-  await chunkSettings
-    .getByRole("button", { name: "Refresh preview", exact: true })
-    .click();
+  const [previewResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response
+          .url()
+          .endsWith(
+            `/projects/${project.id}/knowledge/documents/${document.id}/reparse-preview`,
+          ) && response.request().method() === "POST",
+    ),
+    chunkSettings
+      .getByRole("button", { name: "Refresh preview", exact: true })
+      .click(),
+  ]);
+  expect(previewResponse.status(), "unexpected HTTP status").toBe(200);
+  await expect(reparsePreview).toHaveAttribute("aria-busy", "false");
   await expect(
     chunkSettings.getByText(/Showing \d+ of \d+ chunks/u),
   ).toBeVisible({ timeout: 45_000 });

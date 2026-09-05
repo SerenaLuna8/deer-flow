@@ -167,6 +167,10 @@ function DocumentChunkSettingsForm({
   const capabilities = useKnowledgeFileCapabilities(scope);
   const preview = usePreviewKnowledgeDocumentReparse(scope);
   const reparse = useReparseKnowledgeDocument(scope);
+  // The base fixes the mode for every document; a document still on another
+  // mode (admitted before a base-wide switch) is pre-filled with the base's,
+  // so confirming brings it back in line.
+  const lockedChunkingMode = base.chunking_mode ?? document.chunking_mode;
   // The form starts from the document's frozen parameters. It is keyed by
   // document id, not version: a conflict refreshes the authoritative row
   // while the user's unsaved edits stay in place for re-confirmation.
@@ -174,12 +178,19 @@ function DocumentChunkSettingsForm({
     chunkSize: String(document.chunk_size),
     chunkOverlap: String(document.chunk_overlap),
     chunkSeparator: document.chunk_separator,
-    chunkingMode: document.chunking_mode,
+    chunkingMode: lockedChunkingMode,
     childChunkSize: String(document.child_chunk_size),
     childChunkSeparator: document.child_chunk_separator,
     removeExtraSpaces: document.remove_extra_spaces,
     removeUrlsEmails: document.remove_urls_emails,
   }));
+  useEffect(() => {
+    setDraft((current) =>
+      current.chunkingMode === lockedChunkingMode
+        ? current
+        : { ...current, chunkingMode: lockedChunkingMode },
+    );
+  }, [lockedChunkingMode]);
   const [previewState, setPreviewState] = useState<ReparsePreviewState>({
     status: "idle",
   });
@@ -377,6 +388,9 @@ function DocumentChunkSettingsForm({
                 <p className="text-muted-foreground text-xs leading-5">
                   {labels.documents.chunkSettingsCurrentProfile}
                 </p>
+                <p className="text-muted-foreground text-xs leading-5">
+                  {labels.wizard.knowledgeTokenUnit}
+                </p>
                 <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
                   {labels.documents.reparseWarning}
                 </p>
@@ -392,6 +406,7 @@ function DocumentChunkSettingsForm({
                 disabled={busy}
                 limits={chunkLimits}
                 radioName="document-chunking-mode"
+                lockedMode={lockedChunkingMode}
               />
             </div>
 

@@ -289,6 +289,12 @@ export const knowledgeBaseItemSchema = z
     default_score_threshold: z.number(),
     /** Fraction (0, 1] of the base's best native score; null disables the cut. */
     default_relative_cutoff: z.number().nullable(),
+    /**
+     * Base-wide chunking mode shared by every document, fixed by the first
+     * upload and switched only through the base-wide reparse. Null while the
+     * base holds no live document, so the next upload determines it.
+     */
+    chunking_mode: knowledgeChunkingModeSchema.nullable(),
     delete_error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
@@ -900,6 +906,16 @@ export type KnowledgeReparseInput = {
   child_chunk_size?: number;
   child_chunk_separator?: string;
 };
+
+/**
+ * Base-wide re-parse: one parameter set applied to every document of the
+ * base. It is the only way to switch the base's chunking mode, and the server
+ * admits every settled document or nothing.
+ */
+export type KnowledgeBaseReparseInput = Omit<
+  KnowledgeReparseInput,
+  "expected_version"
+>;
 
 export const knowledgeReparsePreviewResponseSchema = z
   .object({

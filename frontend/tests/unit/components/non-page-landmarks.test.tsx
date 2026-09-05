@@ -1,17 +1,11 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { Section } from "@/components/landing/section";
 import { TodoList } from "@/components/workspace/todo-list";
 
 describe("nested content landmarks", () => {
   test("leaves the page-level main landmark to the owning route", () => {
-    const html = renderToStaticMarkup(
-      <>
-        <Section title="Section title">Section content</Section>
-        <TodoList todos={[]} collapsed />
-      </>,
-    );
+    const html = renderToStaticMarkup(<TodoList todos={[]} collapsed />);
 
     expect(html).not.toMatch(/<main\b/u);
   });

@@ -4282,6 +4282,7 @@ CREATE TABLE knowledge_bases (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     default_relative_cutoff DOUBLE PRECISION,
+    chunking_mode VARCHAR(16),
     CONSTRAINT pk_knowledge_bases PRIMARY KEY (id),
     CONSTRAINT uq_knowledge_bases_project_id_id UNIQUE (project_id, id),
     CONSTRAINT ck_knowledge_bases_name CHECK (btrim(name) <> ''),
@@ -4293,6 +4294,9 @@ CREATE TABLE knowledge_bases (
     ),
     CONSTRAINT ck_knowledge_bases_default_relative_cutoff CHECK (
         default_relative_cutoff IS NULL OR (default_relative_cutoff > 0 AND default_relative_cutoff <= 1)
+    ),
+    CONSTRAINT ck_knowledge_bases_chunking_mode CHECK (
+        chunking_mode IS NULL OR chunking_mode IN ('general', 'parent_child')
     ),
     CONSTRAINT fk_knowledge_bases_project FOREIGN KEY (project_id)
         REFERENCES projects (id) ON DELETE RESTRICT,

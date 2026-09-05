@@ -23,6 +23,45 @@ def test_preview_identity_binds_source_bytes_and_both_profiles():
     assert first != preview_fingerprint(source_sha256="a" * 64, extension=".pdf", profile=profile, capability_revision="r2")
 
 
+def test_splitter_version_changes_preview_but_not_parse_cache_identity():
+    from actweave_knowledge.extraction.manifest import canonical_parse_fingerprint
+    from actweave_knowledge.ingestion.profiles import preview_fingerprint
+
+    current = ProcessingProfile(parse=make_parse_profile(".md"), chunk=make_chunk_profile())
+    old = current.model_copy(update={"chunk": current.chunk.model_copy(update={"splitter_version": "splitter-v2"})})
+    assert current.chunk.splitter_version == "splitter-v3"
+    assert canonical_parse_fingerprint(old.parse) == canonical_parse_fingerprint(current.parse)
+    arguments = dict(source_sha256="a" * 64, extension=".md", capability_revision="same-capability")
+    assert preview_fingerprint(profile=old, **arguments) != preview_fingerprint(profile=current, **arguments)
+
+
+def test_adapter_and_chunk_versions_have_distinct_cache_and_preview_boundaries():
+    from actweave_knowledge.extraction.manifest import canonical_parse_fingerprint
+    from actweave_knowledge.ingestion.profiles import preview_fingerprint, validate_frozen_processing_profile
+
+    profile = ProcessingProfile(parse=make_parse_profile(".txt"), chunk=make_chunk_profile())
+    assert ":adapter-v2:" in profile.parse.extractor_version
+    old_parse = profile.parse.model_copy(update={"extractor_version": profile.parse.extractor_version.replace(":adapter-v2:", ":adapter-v1:")})
+    old = profile.model_copy(update={"parse": old_parse})
+    changed_chunk = profile.model_copy(update={"chunk": profile.chunk.model_copy(update={"splitter_version": "different-test-splitter"})})
+    assert canonical_parse_fingerprint(profile.parse) != canonical_parse_fingerprint(old.parse)
+    assert canonical_parse_fingerprint(profile.parse) == canonical_parse_fingerprint(changed_chunk.parse)
+
+    def fingerprint(value):
+        return preview_fingerprint(
+            source_sha256="a" * 64,
+            extension=".txt",
+            profile=value,
+            capability_revision="same-test-capability",
+        )
+
+    assert fingerprint(profile) != fingerprint(old)
+    assert fingerprint(profile) != fingerprint(changed_chunk)
+    with pytest.raises(ExtractionError) as error:
+        validate_frozen_processing_profile(old.model_dump(mode="json"), extension=".txt", registry=default_registry())
+    assert error.value.reason_code == "PROCESSING_PROFILE_UNAVAILABLE"
+
+
 def test_server_resolves_etl_and_token_identity_with_user_header_rules():
     from actweave_knowledge.ingestion.profiles import ProcessingParameters, resolve_processing_profile
 

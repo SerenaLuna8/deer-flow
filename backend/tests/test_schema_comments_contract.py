@@ -312,7 +312,7 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         re.MULTILINE,
     )
     assert len(table_comments) == 113
-    assert len(column_comments) == 1449
+    assert len(column_comments) == 1450
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -457,6 +457,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("knowledge_bases", "default_top_k"),
         ("knowledge_bases", "default_score_threshold"),
         ("knowledge_bases", "default_relative_cutoff"),
+        ("knowledge_bases", "chunking_mode"),
         ("knowledge_bases", "retrieval_mode"),
         ("knowledge_bases", "summary_index_enabled"),
         ("knowledge_documents", "knowledge_base_id"),

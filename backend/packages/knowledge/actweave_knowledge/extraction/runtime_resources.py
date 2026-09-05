@@ -20,7 +20,7 @@ from pathlib import Path
 from .contracts import ExtractionError
 
 _LOCK_PATH = Path(__file__).with_name("resources.lock.json")
-ADAPTER_REVISION = "adapter-v1"
+ADAPTER_REVISION = "adapter-v2"
 NETWORK_POLICY = "local-input-spacy-load-only-pandoc-pinned-v1;os-deny-required-v1"
 PACKAGES = (
     "beautifulsoup4",

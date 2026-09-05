@@ -19,6 +19,7 @@ from .contracts import (
     KNOWLEDGE_STORAGE_UNAVAILABLE,
     KnowledgeBaseCreate,
     KnowledgeBaseFilterFields,
+    KnowledgeBaseReparseRequest,
     KnowledgeBaseUpdate,
     KnowledgeBaseUpdateResult,
     KnowledgeBaseView,
@@ -559,6 +560,30 @@ class KnowledgeModule:
             request,
             authority=authority,
         )
+
+    async def reparse_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        request: KnowledgeBaseReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority,
+    ) -> KnowledgeRebuildResult:
+        """Base-wide re-parse: the explicit way to switch a base's chunking mode."""
+
+        self._require_parsing_ready()
+        accepted = await self._documents().reparse_knowledge_base(
+            project_id,
+            base_id,
+            request,
+            authority=authority,
+        )
+        base = await self._base_service.get_knowledge_base(
+            project_id,
+            base_id,
+            authority=authority,
+        )
+        return KnowledgeRebuildResult(base=base, accepted_document_count=accepted, skipped_document_ids=())
 
     async def rename_document(
         self,

@@ -254,6 +254,20 @@ export const zhCN: Translations = {
       rebuildConfirmDescription: (name) =>
         `将用所选模型重新嵌入「${name}」的全部已发布文档。分段文本、人工编辑与启停状态保持不变，仅重新生成向量；不读取原文件、不重新解析，附件绑定和图片字节保持不变。处理期间文档暂不参与检索，嵌入调用会产生模型费用。`,
       rebuildConfirm: "确认重建",
+      chunkingModeSectionTitle: "分段模式",
+      chunkingModeHint:
+        "知识库内所有文档共用一种分段模式：由首个上传的文档确定，之后上传与单文档重新解析都沿用；切换需按新参数整库重新解析全部文档。",
+      chunkingModeUndetermined: "尚未确定，由首次上传的文档决定。",
+      switchChunkingModeButton: "切换分段模式",
+      reparseBaseTitle: "整库重新解析",
+      reparseBaseDescription: (name, count) =>
+        `将按下方参数从原始文件重新解析「${name}」的全部 ${count} 个文档并替换其分段：各文档原有的分段参数、人工增删改与段级禁用会被覆盖，已发布附件绑定由新解析结果替换；重新嵌入会产生模型调用费用，处理期间这些文档暂不可检索。`,
+      reparseBaseBlockedHint:
+        "需要所有文档处于就绪或失败状态；有文档正在处理时整库重新解析不会受理。",
+      reparseBaseSubmit: "确认整库重新解析",
+      reparseBasePending: "提交中…",
+      reparseBaseOutcome: (count) =>
+        `已受理 ${count} 个文档重新解析；处理期间这些文档暂不参与检索。`,
     },
     wizard: {
       uploadExistingTitle: "上传文档",
@@ -294,7 +308,7 @@ export const zhCN: Translations = {
       saveAndProcess: "保存并处理",
       chunkSectionTitle: "分段设置",
       knowledgeTokenUnit:
-        "新文档使用“知识库 Token”分段；这是固定的本地单位，不等同于模型计费 Token。",
+        "“知识库 Token”是固定的本地分段单位，不等于所选 Embedding 模型的输入 Token。分段预览不校验模型输入上限；请结合所选模型和服务的限制配置分段。",
       chunkSizeTokenLabel: "分段长度（知识库 Token）",
       chunkOverlapTokenLabel: "分段重叠（知识库 Token）",
       childChunkSizeTokenLabel: "子块最大长度（知识库 Token）",
@@ -404,7 +418,8 @@ export const zhCN: Translations = {
       chunkSizeLabel: "分段长度（字符）",
       chunkSizeHint: "允许 200-4000 字符。",
       chunkOverlapLabel: "分段重叠（字符）",
-      chunkOverlapHint: "允许 0-500 字符，且必须小于分段长度。",
+      chunkOverlapHint:
+        "最多保留设定数量的正文 Token；不跨页面、标题或表格边界，实际重叠可能更少。",
       chunkSeparatorLabel: "分段标识符",
       chunkSeparatorHint: "优先按此分隔符切分；\\n 表示换行（默认 \\n\\n）。",
       chunkingModeLabel: "分段模式",
@@ -420,6 +435,9 @@ export const zhCN: Translations = {
       removeExtraSpacesLabel: "替换连续的空格、换行符和制表符",
       removeUrlsEmailsLabel: "删除所有 URL 和电子邮件地址",
       chunkImmutableNote: "分段参数上传后不可修改；重试沿用原参数。",
+      chunkingModeLockedNote: (mode) =>
+        `该知识库的分段模式已锁定为「${mode}」，所有文档沿用；切换请在知识库设置中整库重新解析。`,
+      chunkingModeMismatch: "与知识库分段模式不一致，请重新解析",
       upload: "上传",
       uploading: "上传中…",
       uploadingProgress: (done, total) => `上传中… (${done}/${total})`,

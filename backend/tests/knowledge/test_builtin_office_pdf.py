@@ -51,6 +51,13 @@ def _hyperlink(paragraph, text, url):
     return element
 
 
+def _set_outline(element, value):
+    properties = element.get_or_add_pPr()
+    node = OxmlElement("w:outlineLvl")
+    node.set(qn("w:val"), str(value))
+    properties.append(node)
+
+
 def _image_pdf(path):
     """Three pages: same XObject twice on page 1, once on page 2, empty page 3."""
     write_pdf(path, ["first page", "", ""])
@@ -470,3 +477,141 @@ def test_word_multiline_header_and_cells_preserve_one_markdown_row_and_image_off
     paragraph_span = next(span for span in row_doc.source_spans if span.block_id == "table:1:row:2:column:1:paragraph:1")
     assert (cell_span.start, cell_span.end) == (paragraph_span.start, paragraph_span.end)
     assert row_doc.page_content[cell_span.start : cell_span.end] == f"line1; line2 ![图片](knowledge-attachment:{occurrence.ref})"
+
+
+@pytest.mark.parametrize("extension", [".docx", ".pdf"])
+@pytest.mark.parametrize("raw", ["- item", "+ item", "1. item", "1) item", "---", "&amp;", "    # indent"])
+def test_word_pdf_plain_source_is_not_markdown(tmp_path, extension, raw):
+    from actweave_knowledge.ingestion.index_text import build_index_text, has_indexable_source_text
+
+    path = tmp_path / ("literal" + extension)
+    if extension == ".docx":
+        word = WordFile()
+        word.add_paragraph(raw)
+        word.save(path)
+    else:
+        write_pdf(path, [raw])
+    docs, _ = _extract(path, tmp_path / "work")
+    assert build_index_text(docs[0].page_content) == raw.strip()
+    assert has_indexable_source_text(tuple(docs))
+    assert docs[0].source_spans[0].start == 0
+    assert docs[0].source_spans[0].end == len(docs[0].page_content)
+    expected_location = {"paragraph": 1} if extension == ".docx" else {"page": 1}
+    assert docs[0].source_spans[0].location == expected_location
+
+
+@pytest.mark.parametrize("indent", ["    ", "\t", " \t"])
+def test_word_cross_run_literals_and_indent_keep_images_and_positions(tmp_path, indent):
+    from actweave_knowledge.ingestion.index_text import build_index_text
+
+    path = tmp_path / "runs.docx"
+    png = tmp_path / "red.png"
+    _png(png)
+    word = WordFile()
+    paragraph = word.add_paragraph()
+    paragraph.add_run("1")
+    paragraph.add_run(". item &amp;\n")
+    paragraph.add_run(indent[:1])
+    paragraph.add_run(indent[1:])
+    paragraph.add_run("# after ")
+    paragraph.add_run().add_picture(str(png))
+    paragraph.add_run(" tail\n")
+    _hyperlink(paragraph, "- linked &amp;", "https://example.invalid/docs")
+    word.save(path)
+
+    (doc,), sink = _extract(path, tmp_path / "work")
+    indexed = build_index_text(doc.page_content)
+    assert indexed.startswith("1. item &amp;\n" + indent + "# after ")
+    assert indexed.endswith("tail\n- linked &amp;")
+    assert "https://example.invalid/docs" not in indexed
+    assert "\\#" not in indexed and "\\&" not in indexed
+    assert len(doc.attachments) == len(sink.assets) == 1
+    image = doc.attachments[0]
+    assert doc.page_content[image.source.start : image.source.end] == f"![图片](knowledge-attachment:{image.ref})"
+    assert image.source.location == {"paragraph": 1, "image_index": 1}
+    assert doc.source_spans[0].end == len(doc.page_content)
+
+
+def test_word_cross_run_heading_keeps_literal_source_heading_as_split_context(tmp_path):
+    from actweave_knowledge.ingestion.index_text import build_index_text
+    from actweave_knowledge.ingestion.splitter import split_documents
+    from actweave_knowledge.ingestion.tokenizer import count_knowledge_tokens
+    from parsing_test_helpers import make_chunk_profile
+
+    path = tmp_path / "split-heading.docx"
+    word = WordFile()
+    heading = word.add_heading(level=1)
+    heading.add_run("Intro")
+    heading.add_run(".*literal* &amp;")
+    word.add_paragraph("body " * 500)
+    word.save(path)
+
+    docs, _ = _extract(path, tmp_path / "work")
+    assert docs[0].heading_path == ("Intro.*literal* &amp;",)
+    assert docs[1].heading_path == ("Intro.*literal* &amp;",)
+    drafts = split_documents(tuple(docs), profile=make_chunk_profile(size=200, overlap=0, child_size=100))
+    body_drafts = [draft for draft in drafts if "body" in draft.content]
+    assert len(body_drafts) > 1
+    assert all(build_index_text(draft.content).startswith("Intro.*literal* &amp;") for draft in body_drafts)
+    first_heading = next(span for span in body_drafts[0].source_spans if build_index_text(body_drafts[0].content[span.start : span.end]) == "Intro.*literal* &amp;")
+    assert first_heading.role == "source" and first_heading.location == {"paragraph": 1}
+    for draft in body_drafts[1:]:
+        repeated = [span for span in draft.source_spans if build_index_text(draft.content[span.start : span.end]) == "Intro.*literal* &amp;"]
+        assert repeated and all(span.role == "context_prefix" and span.location == {"paragraph": 1} for span in repeated)
+        assert count_knowledge_tokens(draft.content) <= 200
+
+
+@pytest.mark.parametrize(
+    "paragraph_level,style_level,expected",
+    [(None, None, 2), (None, 2, 3), (0, 2, 1), (9, 2, None), (None, 6, None), (None, 8, None), (None, "invalid", None)],
+)
+def test_word_custom_outline_uses_nearest_explicit_supported_value(tmp_path, paragraph_level, style_level, expected):
+    from actweave_knowledge.ingestion.index_text import build_index_text
+    from docx.enum.style import WD_STYLE_TYPE
+
+    word = WordFile()
+    parent = word.styles.add_style("ReportParent", WD_STYLE_TYPE.PARAGRAPH)
+    parent.base_style = word.styles["Heading 2"]
+    child = word.styles.add_style("ReportChild", WD_STYLE_TYPE.PARAGRAPH)
+    child.base_style = parent
+    if style_level is not None:
+        _set_outline(parent.element, style_level)
+    paragraph = word.add_paragraph("# Literal &amp;", style=child)
+    if paragraph_level is not None:
+        _set_outline(paragraph._p, paragraph_level)
+    word.add_paragraph("following text")
+    path = tmp_path / "outline.docx"
+    word.save(path)
+    docs, _ = _extract(path, tmp_path / "work")
+    assert build_index_text(docs[0].page_content) == "# Literal &amp;"
+    if expected is None:
+        assert not docs[0].page_content.startswith("#")
+        assert docs[0].heading_path == docs[1].heading_path == ()
+    else:
+        assert docs[0].page_content.startswith("#" * expected + " ")
+        assert docs[0].heading_path == docs[1].heading_path == ("# Literal &amp;",)
+
+
+def test_word_heading_fallback_terminates_cycles_and_keeps_builtin_priority(tmp_path):
+    from docx.enum.style import WD_STYLE_TYPE
+
+    word = WordFile()
+    first = word.styles.add_style("CycleFirst", WD_STYLE_TYPE.PARAGRAPH)
+    second = word.styles.add_style("CycleSecond", WD_STYLE_TYPE.PARAGRAPH)
+    first.base_style = second
+    second.base_style = first
+    word.add_paragraph("cycle text", style=first)
+    word.add_paragraph("title text", style="Title")
+    word.add_paragraph("subtitle text", style="Subtitle")
+    built = word.add_paragraph("known", style="Heading 1")
+    _set_outline(built._p, 9)
+    body = word.add_paragraph("body text")
+    _set_outline(body._p, 8)
+    path = tmp_path / "cycle.docx"
+    word.save(path)
+    docs, _ = _extract(path, tmp_path / "work")
+    assert [doc.page_content for doc in docs[:3]] == ["cycle text", "title text", "subtitle text"]
+    assert all(doc.heading_path == () for doc in docs[:3])
+    assert docs[3].page_content == "# known"
+    assert docs[4].heading_path == ("known",)
+    assert docs[4].page_content == "body text"

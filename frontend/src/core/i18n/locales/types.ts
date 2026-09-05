@@ -212,6 +212,16 @@ export interface Translations {
       rebuildConfirmTitle: string;
       rebuildConfirmDescription: (name: string) => string;
       rebuildConfirm: string;
+      chunkingModeSectionTitle: string;
+      chunkingModeHint: string;
+      chunkingModeUndetermined: string;
+      switchChunkingModeButton: string;
+      reparseBaseTitle: string;
+      reparseBaseDescription: (name: string, count: number) => string;
+      reparseBaseBlockedHint: string;
+      reparseBaseSubmit: string;
+      reparseBasePending: string;
+      reparseBaseOutcome: (count: number) => string;
     };
     wizard: {
       uploadExistingTitle: string;
@@ -370,6 +380,8 @@ export interface Translations {
       removeExtraSpacesLabel: string;
       removeUrlsEmailsLabel: string;
       chunkImmutableNote: string;
+      chunkingModeLockedNote: (mode: string) => string;
+      chunkingModeMismatch: string;
       upload: string;
       uploading: string;
       uploadingProgress: (done: number, total: number) => string;

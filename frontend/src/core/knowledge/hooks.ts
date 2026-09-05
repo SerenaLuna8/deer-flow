@@ -35,6 +35,7 @@ import {
   previewKnowledgeChunks,
   previewKnowledgeDocumentReparse,
   rebuildKnowledgeBase,
+  reparseKnowledgeBase,
   renameKnowledgeDocument,
   renameKnowledgeMetadataField,
   reparseKnowledgeDocument,
@@ -59,6 +60,7 @@ import {
   type KnowledgeDocumentItem,
   type KnowledgeDocumentListResponse,
   type KnowledgeDocumentsMetadataInput,
+  type KnowledgeBaseReparseInput,
   type KnowledgeReparseInput,
   type KnowledgeSearchInput,
   type PreviewKnowledgeChunksInput,
@@ -320,6 +322,31 @@ export function useRebuildKnowledgeBase(scope: ProjectClientScope) {
       baseId: string;
       embeddingModelId: string;
     }) => rebuildKnowledgeBase(scope.projectId, baseId, embeddingModelId),
+    onSuccess: async (_item, variables) => {
+      await Promise.all([
+        invalidate.bases(),
+        invalidate.documents(variables.baseId),
+      ]);
+    },
+  });
+}
+
+/**
+ * Base-wide re-parse: the only way to switch a base's chunking mode. The
+ * server admits every settled document or nothing, so success refreshes both
+ * the base (its mode) and its document rows (now queued).
+ */
+export function useReparseKnowledgeBase(scope: ProjectClientScope) {
+  const invalidate = useInvalidateKnowledge(scope);
+  return useMutation({
+    mutationKey: knowledgeQueryKey(scope, "mutation", "reparse-base"),
+    mutationFn: ({
+      baseId,
+      input,
+    }: {
+      baseId: string;
+      input: KnowledgeBaseReparseInput;
+    }) => reparseKnowledgeBase(scope.projectId, baseId, input),
     onSuccess: async (_item, variables) => {
       await Promise.all([
         invalidate.bases(),

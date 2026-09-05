@@ -81,3 +81,16 @@ def test_corrupt_lock_fails_closed_with_safe_reason(resources, tmp_path, monkeyp
     path.write_text(json.dumps(payload))
     monkeypatch.setattr(resources, "_LOCK_PATH", path)
     assert resources.probe_parser_resources("unstructured.pptx") == "PARSER_DEPENDENCY_UNAVAILABLE"
+
+
+def test_adapter_v2_is_packaged_with_matching_verified_resource_identity(resources):
+    from actweave_knowledge.extraction.registry import default_registry
+
+    assert resources.ADAPTER_REVISION == "adapter-v2"
+    locked = resources._locked_manifest()
+    assert locked is not None
+    assert locked["adapter_revision"] == resources.ADAPTER_REVISION
+    registrations = default_registry().registrations
+    assert registrations
+    assert all(":adapter-v2:" in item.extractor_version for item in registrations)
+    assert all(item.dependency_probe() is None for item in registrations)

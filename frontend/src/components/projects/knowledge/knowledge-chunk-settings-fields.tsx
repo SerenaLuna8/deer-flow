@@ -27,11 +27,13 @@ const INPUT_CLASS_NAME =
   "bg-background border-input/80 h-9 rounded-lg text-[13px] shadow-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/15 md:text-[13px]";
 
 /**
- * The chunking-mode cards shared by the upload wizard and a document's chunk
- * settings page: one card per mode, the selected card expands into its
- * parameters and the preprocessing rules. `limits` are the server's Token
- * bounds when known; the inputs otherwise fall back to unbounded attributes
- * and the caller validates against the client mirror.
+ * The chunking-mode cards shared by the upload wizard, a document's chunk
+ * settings page, and the base-wide reparse dialog: one card per mode, the
+ * selected card expands into its parameters and the preprocessing rules.
+ * `limits` are the server's Token bounds when known; the inputs otherwise
+ * fall back to unbounded attributes and the caller validates against the
+ * client mirror. `lockedMode` renders the base's fixed mode: the radios are
+ * disabled and a note points at the base-wide reparse as the only switch.
  */
 export function KnowledgeChunkSettingsFields({
   value,
@@ -39,22 +41,37 @@ export function KnowledgeChunkSettingsFields({
   disabled,
   limits,
   radioName,
+  lockedMode,
 }: {
   value: KnowledgeChunkSettingsDraft;
   onChange: (next: KnowledgeChunkSettingsDraft) => void;
   disabled: boolean;
   limits?: KnowledgeChunkLimits;
   radioName: string;
+  lockedMode?: KnowledgeChunkingMode | null;
 }) {
   const { t } = useI18n();
   const labels = t.knowledge;
   const wizard = labels.wizard;
   const update = (patch: Partial<KnowledgeChunkSettingsDraft>) =>
     onChange({ ...value, ...patch });
+  const modeLocked = lockedMode !== undefined && lockedMode !== null;
 
   return (
     <fieldset className="grid gap-2.5">
       <legend className="sr-only">{labels.documents.chunkingModeLabel}</legend>
+      {modeLocked ? (
+        <p
+          className="text-muted-foreground text-xs leading-5"
+          data-testid="knowledge-chunking-mode-locked"
+        >
+          {labels.documents.chunkingModeLockedNote(
+            lockedMode === "parent_child"
+              ? labels.documents.chunkingModeParentChild
+              : labels.documents.chunkingModeGeneral,
+          )}
+        </p>
+      ) : null}
       {(
         [
           [
@@ -76,9 +93,15 @@ export function KnowledgeChunkSettingsFields({
             value.chunkingMode === mode
               ? "border-blue-600"
               : "border-border/70",
+            modeLocked && value.chunkingMode !== mode && "opacity-60",
           )}
         >
-          <label className="bg-muted/35 flex min-h-16 cursor-pointer items-start gap-3 p-3">
+          <label
+            className={cn(
+              "bg-muted/35 flex min-h-16 items-start gap-3 p-3",
+              modeLocked ? "cursor-not-allowed" : "cursor-pointer",
+            )}
+          >
             <span
               aria-hidden
               className="border-border/50 bg-background flex size-8 shrink-0 items-center justify-center rounded-lg border shadow-xs"
@@ -101,7 +124,7 @@ export function KnowledgeChunkSettingsFields({
               value={mode}
               className="mt-1 size-4 shrink-0 accent-blue-600"
               checked={value.chunkingMode === mode}
-              disabled={disabled}
+              disabled={disabled || modeLocked}
               onChange={() => update({ chunkingMode: mode })}
             />
           </label>
@@ -154,6 +177,7 @@ export function KnowledgeChunkSettingsFields({
                     type="number"
                     min={KNOWLEDGE_CHUNK_OVERLAP_MIN}
                     max={limits?.overlap_max}
+                    aria-describedby={`${radioName}-overlap-hint`}
                     required
                     disabled={disabled}
                     value={value.chunkOverlap}
@@ -163,6 +187,12 @@ export function KnowledgeChunkSettingsFields({
                   />
                 </label>
               </div>
+              <p
+                id={`${radioName}-overlap-hint`}
+                className="text-muted-foreground text-xs leading-5"
+              >
+                {labels.documents.chunkOverlapHint}
+              </p>
               {mode === "parent_child" ? (
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold">

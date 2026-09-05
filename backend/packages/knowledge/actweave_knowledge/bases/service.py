@@ -37,7 +37,7 @@ from ..contracts import (
     KnowledgeSettings,
     KnowledgeSummaryBackfill,
 )
-from ..persistence.derivations import delete_error_expression, document_count_expression
+from ..persistence.derivations import delete_error_expression, document_count_expression, live_document_count_expression
 from ..persistence.models import (
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
@@ -94,7 +94,7 @@ def _validated_page(page: int, page_size: int) -> tuple[int, int]:
     return page, page_size
 
 
-def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | None) -> KnowledgeBaseView:
+def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | None, live_document_count: int) -> KnowledgeBaseView:
     return KnowledgeBaseView(
         id=row.id,
         project_id=row.project_id,
@@ -112,6 +112,9 @@ def _view(row: KnowledgeBaseRow, *, document_count: int, delete_error: str | Non
         created_at=row.created_at,
         updated_at=row.updated_at,
         default_relative_cutoff=row.default_relative_cutoff,
+        # A stored mode only binds while documents hold it; an emptied base is
+        # undetermined again and its next upload chooses freely.
+        chunking_mode=row.chunking_mode if live_document_count > 0 else None,  # type: ignore[arg-type]
     )
 
 
@@ -120,7 +123,23 @@ def _base_with_derivations(project_id: UUID):  # noqa: ANN202 - SQLAlchemy selec
         KnowledgeBaseRow,
         document_count_expression(KnowledgeBaseRow.id).label("document_count"),
         delete_error_expression("delete_knowledge_base", KnowledgeBaseRow.id).label("delete_error"),
+        live_document_count_expression(KnowledgeBaseRow.id).label("live_document_count"),
     ).where(KnowledgeBaseRow.project_id == project_id)
+
+
+async def _view_with_derivations(session: AsyncSession, row: KnowledgeBaseRow) -> KnowledgeBaseView:
+    """Project one locked/refreshed base row with its derived counts."""
+
+    document_count, delete_error, live_document_count = (
+        await session.execute(
+            select(
+                document_count_expression(KnowledgeBaseRow.id),
+                delete_error_expression("delete_knowledge_base", KnowledgeBaseRow.id),
+                live_document_count_expression(KnowledgeBaseRow.id),
+            ).where(KnowledgeBaseRow.id == row.id)
+        )
+    ).one()
+    return _view(row, document_count=int(document_count), delete_error=delete_error, live_document_count=int(live_document_count))
 
 
 class KnowledgeBaseService:
@@ -196,7 +215,7 @@ class KnowledgeBaseService:
                 session.add(row)
                 await session.flush()
                 await session.refresh(row)
-                return _view(row, document_count=0, delete_error=None)
+                return _view(row, document_count=0, delete_error=None, live_document_count=0)
         except IntegrityError as exc:
             if "uq_knowledge_bases_project_name" in str(exc):
                 raise KnowledgeError(KNOWLEDGE_NAME_CONFLICT, "同一 Project 内已存在同名 Knowledge Base") from None
@@ -226,7 +245,7 @@ class KnowledgeBaseService:
                 )
                 total = await session.scalar(select(func.count()).select_from(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id))
                 rows = await session.execute(_base_with_derivations(project_id).order_by(KnowledgeBaseRow.updated_at.desc(), KnowledgeBaseRow.id.desc()).offset((page - 1) * page_size).limit(page_size))
-                views = [_view(row, document_count=int(document_count), delete_error=delete_error) for row, document_count, delete_error in rows.all()]
+                views = [_view(row, document_count=int(document_count), delete_error=delete_error, live_document_count=int(live_document_count)) for row, document_count, delete_error, live_document_count in rows.all()]
                 return views, int(total or 0)
         except SQLAlchemyError:
             raise _storage_unavailable() from None
@@ -250,8 +269,8 @@ class KnowledgeBaseService:
             raise _storage_unavailable() from None
         if result is None:
             raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
-        row, document_count, delete_error = result
-        return _view(row, document_count=int(document_count), delete_error=delete_error)
+        row, document_count, delete_error, live_document_count = result
+        return _view(row, document_count=int(document_count), delete_error=delete_error, live_document_count=int(live_document_count))
 
     async def update_knowledge_base(
         self,
@@ -371,15 +390,7 @@ class KnowledgeBaseService:
                         session.add(KnowledgeTaskRow(id=uuid4(), project_id=project_id, resource_id=document.id, kind="summarize_document", target_version=document.version))
                         accepted += 1
                     summary_backfill = KnowledgeSummaryBackfill(accepted_document_count=accepted, skipped_document_ids=tuple(skipped))
-                document_count, delete_error = (
-                    await session.execute(
-                        select(
-                            document_count_expression(KnowledgeBaseRow.id),
-                            delete_error_expression("delete_knowledge_base", KnowledgeBaseRow.id),
-                        ).where(KnowledgeBaseRow.id == base_id)
-                    )
-                ).one()
-                return KnowledgeBaseUpdateResult(base=_view(row, document_count=int(document_count), delete_error=delete_error), summary_backfill=summary_backfill)
+                return KnowledgeBaseUpdateResult(base=await _view_with_derivations(session, row), summary_backfill=summary_backfill)
         except IntegrityError:
             raise KnowledgeError(KNOWLEDGE_NAME_CONFLICT, "同一 Project 内已存在同名 Knowledge Base") from None
         except KnowledgeError:
@@ -470,16 +481,8 @@ class KnowledgeBaseService:
                     accepted += 1
                 await session.flush()
                 await session.refresh(row)
-                document_count, delete_error = (
-                    await session.execute(
-                        select(
-                            document_count_expression(KnowledgeBaseRow.id),
-                            delete_error_expression("delete_knowledge_base", KnowledgeBaseRow.id),
-                        ).where(KnowledgeBaseRow.id == base_id)
-                    )
-                ).one()
                 return KnowledgeRebuildResult(
-                    base=_view(row, document_count=int(document_count), delete_error=delete_error),
+                    base=await _view_with_derivations(session, row),
                     accepted_document_count=accepted,
                     skipped_document_ids=tuple(skipped),
                 )
@@ -631,15 +634,7 @@ class KnowledgeBaseService:
                         session.add(_base_delete_task(project_id, row.id))
                 await session.flush()
                 await session.refresh(row)
-                document_count, delete_error = (
-                    await session.execute(
-                        select(
-                            document_count_expression(KnowledgeBaseRow.id),
-                            delete_error_expression("delete_knowledge_base", KnowledgeBaseRow.id),
-                        ).where(KnowledgeBaseRow.id == base_id)
-                    )
-                ).one()
-                return _view(row, document_count=int(document_count), delete_error=delete_error)
+                return await _view_with_derivations(session, row)
         except KnowledgeError:
             raise
         except SQLAlchemyError:

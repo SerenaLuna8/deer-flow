@@ -25,12 +25,32 @@ from actweave_knowledge.contracts import KNOWLEDGE_QUOTA_EXCEEDED, KnowledgeErro
 from ..base import BaseExtractor
 from ..contracts import AttachmentOccurrence, Document, ExtractionContext, ExtractionError, ExtractSetting, ParseWarning, SourceSpan
 from ..images import ImageRejected, work_directory_bytes
+from ..literal import escape_literal_text
 
 
 def _literal(text: str) -> str:
-    # Word text is not Markdown source: keep markup-looking text inert without
-    # stripping any run spaces (including spaces between formatting changes).
-    return re.sub(r"([\\`*_\[\]<>#!|~])", r"\\\1", text)
+    return escape_literal_text(text, protect_indentation=False)
+
+
+def _heading_level(paragraph: Paragraph) -> int | None:
+    style = paragraph.style
+    builtin = re.fullmatch(r"Heading ([1-6])", style.name if style is not None else "")
+    if builtin:
+        return int(builtin[1])
+    nodes = paragraph._p.xpath("./w:pPr/w:outlineLvl")
+    seen: set[str] = set()
+    while True:
+        if nodes:
+            try:
+                value = int(nodes[0].get(qn("w:val"), ""))
+            except (TypeError, ValueError):
+                return None
+            return value + 1 if 0 <= value <= 5 else None
+        if style is None or style.style_id in seen:
+            return None
+        seen.add(style.style_id)
+        nodes = style.element.xpath("./w:pPr/w:outlineLvl")
+        style = style.base_style
 
 
 def _safe_url(url: str) -> str | None:
@@ -87,7 +107,7 @@ class _Block:
     def protect_indentation(self, state: _State) -> None:
         # Preserve leading whitespace as a character entity only where CommonMark
         # would otherwise turn a Word paragraph (and its images) into code.
-        edits = [(match.start(), "&#9;" if match[0] == "\t" else "&#32;") for match in re.finditer(r"(?m)^(?= {4}|\t)[ \t]", self.text)]
+        edits = [(match.start(), "&#9;" if match[0] == "\t" else "&#32;") for match in re.finditer(r"(?m)^(?= {4}| {0,3}\t)[ \t]", self.text)]
         if not edits:
             return
         state.charge(sum(len(replacement) - 1 for _, replacement in edits))
@@ -226,10 +246,8 @@ class WordExtractor(BaseExtractor):
 
     def _parse_cell_paragraph(self, paragraph: Paragraph, location: dict, block_id: str, state: _State, *, inline_table: bool = False) -> _Block:
         paragraph_content = _Block()
-        style = paragraph.style.name if paragraph.style is not None else ""
-        heading = re.fullmatch(r"Heading ([1-6])", style)
-        if heading:
-            level = int(heading[1])
+        level = _heading_level(paragraph)
+        if level is not None:
             state.headings = [(n, title) for n, title in state.headings if n < level]
             state.headings.append((level, paragraph.text))
             paragraph_content.append("#" * level + " ", state)

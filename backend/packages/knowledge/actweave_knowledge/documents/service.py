@@ -36,6 +36,7 @@ from ..contracts import (
     KNOWLEDGE_NOT_FOUND,
     KNOWLEDGE_QUOTA_EXCEEDED,
     KNOWLEDGE_STORAGE_UNAVAILABLE,
+    KnowledgeBaseReparseRequest,
     KnowledgeChunkingMode,
     KnowledgeChunkPreviewRequest,
     KnowledgeDocumentAttachmentView,
@@ -186,7 +187,34 @@ def validated_chunking_mode(
     return "parent_child", child_chunk_size, child_chunk_separator
 
 
-def _processing_parameters(request: KnowledgeDocumentUpload | KnowledgeReparseRequest) -> ProcessingParameters:
+_CHUNKING_MODE_LABELS = {"general": "通用", "parent_child": "父子分段"}
+
+
+def _chunking_mode_locked(base_mode: str) -> KnowledgeError:
+    """The base-wide mode is fixed by its documents; only a base-wide reparse switches it."""
+
+    label = _CHUNKING_MODE_LABELS.get(base_mode, base_mode)
+    return _invalid(f"该知识库的分段模式已锁定为「{label}」，文档必须使用同一模式；切换请在知识库设置中整库重新解析")
+
+
+async def _live_document_count(session: AsyncSession, base_id: UUID) -> int:
+    """Documents attached and not being deleted — the rows holding the base's mode."""
+
+    count = await session.scalar(
+        select(func.count())
+        .select_from(KnowledgeDocumentRow)
+        .where(
+            KnowledgeDocumentRow.knowledge_base_id == base_id,
+            KnowledgeDocumentRow.status != "deleting",
+        )
+    )
+    return int(count or 0)
+
+
+_ProcessingRequest = KnowledgeDocumentUpload | KnowledgeReparseRequest | KnowledgeBaseReparseRequest
+
+
+def _processing_parameters(request: _ProcessingRequest) -> ProcessingParameters:
     from ..ingestion.profiles import ProcessingParameters
 
     if request.processing_profile is not None:
@@ -203,7 +231,7 @@ def _processing_parameters(request: KnowledgeDocumentUpload | KnowledgeReparseRe
     )
 
 
-def _apply_processing_parameters(request: KnowledgeDocumentUpload | KnowledgeReparseRequest) -> KnowledgeDocumentUpload | KnowledgeReparseRequest:
+def _apply_processing_parameters[R: _ProcessingRequest](request: R) -> R:
     from ..ingestion.profiles import ProcessingParameters
 
     if request.processing_profile is None:
@@ -298,6 +326,31 @@ def _validated_reparse(request: KnowledgeReparseRequest) -> KnowledgeReparseRequ
         expected_version=request.expected_version,
         processing_profile=request.processing_profile,
         expected_preview_fingerprint=request.expected_preview_fingerprint,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        chunk_separator=chunk_separator,
+        remove_extra_spaces=remove_extra_spaces,
+        remove_urls_emails=remove_urls_emails,
+        chunking_mode=chunking_mode,
+        child_chunk_size=child_chunk_size,
+        child_chunk_separator=child_chunk_separator,
+    )
+
+
+def _validated_base_reparse(request: KnowledgeBaseReparseRequest) -> KnowledgeBaseReparseRequest:
+    """The one parameter set every document of the base will be re-split with."""
+
+    request = _apply_processing_parameters(request)
+    chunk_size, chunk_overlap, chunk_separator = validated_chunk_settings(request.chunk_size, request.chunk_overlap, request.chunk_separator)
+    remove_extra_spaces, remove_urls_emails = validated_preprocessing_rules(request.remove_extra_spaces, request.remove_urls_emails)
+    chunking_mode, child_chunk_size, child_chunk_separator = validated_chunking_mode(
+        request.chunking_mode,
+        request.child_chunk_size,
+        request.child_chunk_separator,
+        chunk_size=chunk_size,
+    )
+    return KnowledgeBaseReparseRequest(
+        processing_profile=request.processing_profile,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         chunk_separator=chunk_separator,
@@ -619,6 +672,16 @@ class KnowledgeDocumentService:
                         KNOWLEDGE_QUOTA_EXCEEDED,
                         f"Knowledge Base 内 Document 数量已达上限 {self._settings.max_documents_per_knowledge_base}",
                     )
+                # The base lock serializes this decision: the first live
+                # document fixes the base-wide chunking mode and every later
+                # upload must match it. An emptied base (or a stored mode no
+                # document holds) is determined again by the next upload.
+                if base.chunking_mode is not None and await _live_document_count(session, base_id) > 0:
+                    if validated.chunking_mode != base.chunking_mode:
+                        raise _chunking_mode_locked(base.chunking_mode)
+                elif base.chunking_mode != validated.chunking_mode:
+                    base.chunking_mode = validated.chunking_mode
+                    base.updated_at = func.now()  # type: ignore[assignment]
                 session.add(
                     KnowledgeDocumentRow(
                         id=document_id,
@@ -1031,6 +1094,15 @@ class KnowledgeDocumentService:
                 if row.status != "failed":
                     raise _invalid("仅 failed 状态的文档支持重试")
                 retry_kind, retry_reparse_settings = (last_indexing.kind, last_indexing.reparse_settings) if last_indexing is not None else ("ingest_document", None)
+                if retry_kind == "ingest_document":
+                    # A retry re-admits content under its frozen mode. After a
+                    # base-wide switch that mode may no longer be the base's;
+                    # the explicit reparse (locked to the base mode) is the
+                    # way back in.
+                    retry_mode = validated_reparse_settings(retry_reparse_settings)["chunking_mode"] if retry_reparse_settings is not None else row.chunking_mode
+                    base_mode = await session.scalar(select(KnowledgeBaseRow.chunking_mode).where(KnowledgeBaseRow.id == row.knowledge_base_id))
+                    if base_mode is not None and retry_mode != base_mode:
+                        raise _invalid("该文档的分段模式与知识库已锁定的模式不同，请通过分段设置按知识库模式重新解析")
                 row.version = row.version + 1
                 row.status = "queued"
                 if retry_kind == "ingest_document" and row.published_version is None:
@@ -1092,6 +1164,15 @@ class KnowledgeDocumentService:
             raise _invalid("仅 ready 或 failed 状态的文档支持重新解析")
         if row.version != validated.expected_version:
             raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+        # A preview describes a reparse that must be admissible: the base's
+        # locked mode rejects a per-document switch before any parsing work.
+        try:
+            async with self._session_factory() as session, session.begin():
+                base_mode = await session.scalar(select(KnowledgeBaseRow.chunking_mode).where(KnowledgeBaseRow.id == row.knowledge_base_id, KnowledgeBaseRow.project_id == project_id))
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+        if base_mode is not None and validated.chunking_mode != base_mode:
+            raise _chunking_mode_locked(base_mode)
 
         # Deferred import: ingestion.preview imports this module's validators.
         from ..ingestion.preview import preview_document_chunks
@@ -1193,16 +1274,26 @@ class KnowledgeDocumentService:
                     session,
                     project_id=project_id,
                 )
+                # Base before document: the same order as upload admission and
+                # the base-wide reparse, so a concurrent mode switch and this
+                # admission serialize instead of deadlocking.
+                base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == snapshot.knowledge_base_id).with_for_update())
+                if base is None or base.status != "active":
+                    raise _invalid("所属 Knowledge Base 不是 active 状态，不能重新解析")
                 row = await session.scalar(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.project_id == project_id, KnowledgeDocumentRow.id == document_id).with_for_update())
-                if row is None:
+                if row is None or row.knowledge_base_id != base.id:
                     raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Document 不存在")
                 if row.status not in _REPARSABLE_STATUSES:
                     raise _invalid("仅 ready 或 failed 状态的文档支持重新解析")
-                base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.id == row.knowledge_base_id))
-                if base_status != "active":
-                    raise _invalid("所属 Knowledge Base 不是 active 状态，不能重新解析")
                 if row.version != validated.expected_version or row.original_name != snapshot.original_name:
                     raise KnowledgeError(KNOWLEDGE_CONFLICT, "文档已被其他操作更新，请刷新后重试")
+                # One document never switches the base-wide mode; a base whose
+                # mode was never recorded adopts this confirmed one.
+                if base.chunking_mode is not None and validated.chunking_mode != base.chunking_mode:
+                    raise _chunking_mode_locked(base.chunking_mode)
+                if base.chunking_mode is None:
+                    base.chunking_mode = validated.chunking_mode
+                    base.updated_at = func.now()  # type: ignore[assignment]
                 open_indexing = await session.scalar(
                     select(KnowledgeTaskRow.id).where(
                         KnowledgeTaskRow.resource_id == row.id,
@@ -1238,6 +1329,117 @@ class KnowledgeDocumentService:
                 await session.refresh(row)
                 delete_error = await self._derived_delete_error(session, row.id)
                 return document_view(row, delete_error=delete_error)
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+
+    async def reparse_knowledge_base(
+        self,
+        project_id: UUID,
+        base_id: UUID,
+        request: KnowledgeBaseReparseRequest,
+        *,
+        authority: KnowledgeProjectAuthority | None = None,
+    ) -> int:
+        """Queue one explicit re-parse per document with a single parameter set.
+
+        This is the only path that changes a populated base's chunking mode,
+        and it is all-or-nothing: any document still in flight or holding an
+        open indexing task rejects the whole operation, because a document
+        publishing under the previous mode after the switch would break the
+        base-wide invariant. Parser identity follows each file's extension,
+        so the frozen profile is resolved per distinct extension outside the
+        transaction; the write transaction then re-locks base and documents
+        (base first, the shared order), verifies the document set is the one
+        the profiles were resolved for, switches the base mode, and bumps
+        every document to ``queued`` with its own frozen ``reparse_settings``.
+        Returns the number of admitted documents.
+        """
+
+        from ..ingestion.profiles import chunk_settings, resolve_processing_profile
+
+        validated = _validated_base_reparse(request)
+        registry = await run_sync_to_completion(default_registry)
+        capabilities = self._require_parsing_capabilities()
+        parameters = _processing_parameters(validated)
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(authority, session, project_id=project_id)
+                base_status = await session.scalar(select(KnowledgeBaseRow.status).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id))
+                if base_status is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
+                snapshot = (
+                    await session.execute(
+                        select(KnowledgeDocumentRow.id, KnowledgeDocumentRow.original_name).where(KnowledgeDocumentRow.knowledge_base_id == base_id, KnowledgeDocumentRow.status != "deleting").order_by(KnowledgeDocumentRow.id)
+                    )
+                ).all()
+        except KnowledgeError:
+            raise
+        except SQLAlchemyError:
+            raise _storage_unavailable() from None
+        if not snapshot:
+            raise _invalid("知识库还没有文档；分段模式由首次上传的文档决定")
+        expected_documents = {document_id: original_name for document_id, original_name in snapshot}
+        frozen_by_extension: dict[str, dict] = {}
+        for extension in sorted({Path(name).suffix.lower() for name in expected_documents.values()}):
+            try:
+                profile = await run_sync_to_completion(resolve_processing_profile, self._settings, parameters, registry, extension=extension)
+            except ValueError:
+                raise _invalid("分段参数无效") from None
+            frozen = {**chunk_settings(profile), "processing_profile": profile.model_dump(mode="json"), "capability_revision": capabilities.capability_revision}
+            validated_reparse_settings(frozen)
+            frozen_by_extension[extension] = frozen
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await revalidate_project_authority(authority, session, project_id=project_id)
+                if not await self._project_active_check(session, project_id):
+                    raise KnowledgeProjectInactive()
+                base = await session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.project_id == project_id, KnowledgeBaseRow.id == base_id).with_for_update())
+                if base is None:
+                    raise KnowledgeError(KNOWLEDGE_NOT_FOUND, "Knowledge Base 不存在")
+                if base.status != "active":
+                    raise _invalid("仅 active 状态的 Knowledge Base 支持整库重新解析")
+                documents = (await session.scalars(select(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id).order_by(KnowledgeDocumentRow.id).with_for_update())).all()
+                live = [document for document in documents if document.status != "deleting"]
+                if {document.id: document.original_name for document in live} != expected_documents:
+                    raise KnowledgeError(KNOWLEDGE_CONFLICT, "知识库文档已变化，请刷新后重试")
+                blocking = sorted({document.status for document in live if document.status not in _REPARSABLE_STATUSES})
+                if blocking:
+                    raise _invalid(f"存在 {'/'.join(blocking)} 状态的文档，请等待处理完成后再整库重新解析")
+                open_indexing = await session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeTaskRow)
+                    .where(
+                        KnowledgeTaskRow.resource_id.in_([document.id for document in live]),
+                        KnowledgeTaskRow.kind.in_(VERSIONED_TASK_KINDS),
+                        KnowledgeTaskRow.status.in_(TASK_OPEN_STATUSES),
+                    )
+                )
+                if open_indexing:
+                    raise _invalid("存在未完成的索引任务，请等待完成后再整库重新解析")
+                base.chunking_mode = validated.chunking_mode
+                base.updated_at = func.now()  # type: ignore[assignment]
+                for document in live:
+                    document.version = document.version + 1
+                    document.status = "queued"
+                    document.error_message = None
+                    document.updated_at = func.now()  # type: ignore[assignment]
+                    session.add(
+                        KnowledgeTaskRow(
+                            id=uuid4(),
+                            project_id=project_id,
+                            resource_id=document.id,
+                            kind="ingest_document",
+                            target_version=document.version,
+                            status="queued",
+                            reparse_settings=frozen_by_extension[Path(document.original_name).suffix.lower()],
+                        )
+                    )
+                await session.flush()
+                return len(live)
         except KnowledgeError:
             raise
         except SQLAlchemyError:

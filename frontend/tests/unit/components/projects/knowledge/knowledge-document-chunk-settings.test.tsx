@@ -65,6 +65,7 @@ const base: KnowledgeBaseItem = {
   default_top_k: 5,
   default_score_threshold: 0,
   default_relative_cutoff: null,
+  chunking_mode: "parent_child",
   delete_error: null,
   created_at: "2026-08-29T00:00:00Z",
   updated_at: "2026-08-29T00:00:00Z",
@@ -139,6 +140,14 @@ describe("KnowledgeDocumentChunkSettings", () => {
       /<input type="radio"[^>]*checked=""[^>]*value="general"/u,
     );
     expect(html).toMatch(/<input type="checkbox"[^>]*checked=""/u);
+    // The mode belongs to the base: shown as locked, never a per-document switch.
+    expect(html).toContain("分段模式已锁定为「父子分段」");
+    expect(html).toMatch(
+      /<input type="radio"[^>]*disabled=""[^>]*value="general"/u,
+    );
+    expect(html).toMatch(
+      /<input type="radio"[^>]*disabled=""[^>]*value="parent_child"/u,
+    );
     expect(html).toContain("已填入该文档当前的分段参数");
     expect(html).toContain("全量替换分段");
     expect(html).not.toContain("历史字符单位");
@@ -153,6 +162,20 @@ describe("KnowledgeDocumentChunkSettings", () => {
     expect(html).toContain("预览文件：使用教程.docx");
     expect(html).not.toContain("Chunk-");
     expect(html).toContain(">确认重新解析</button>");
+  });
+
+  test("pre-fills the base's mode for a document still on the previous one", () => {
+    // Admitted before a base-wide switch: confirming must bring it in line
+    // with the base, not re-freeze the stale mode.
+    const html = render([{ ...document, chunking_mode: "general" }]);
+
+    expect(html).toContain("分段模式已锁定为「父子分段」");
+    expect(html).toMatch(
+      /<input type="radio"[^>]*checked=""[^>]*value="parent_child"/u,
+    );
+    expect(html).not.toMatch(
+      /<input type="radio"[^>]*checked=""[^>]*value="general"/u,
+    );
   });
 
   test("warns when a historical character-unit document will switch to Knowledge Tokens", () => {

@@ -274,7 +274,12 @@ def test_plain_text_image_notation_is_not_rewritten(tmp_path):
     text = "  ![a](https://example.invalid) <IP>  "
     path.write_text(text)
     docs = ExtractProcessor().extract(make_setting(path), make_context(tmp_path / "work"))
-    assert docs[0].page_content == text
+    from actweave_knowledge.ingestion.index_text import build_index_text
+
+    assert build_index_text(docs[0].page_content) == text.strip()
+    assert not docs[0].attachments and not docs[0].warnings
+    assert docs[0].page_content.startswith("  ")
+    assert docs[0].page_content.endswith("  ")
     assert normalize_documents(docs) == docs
 
 

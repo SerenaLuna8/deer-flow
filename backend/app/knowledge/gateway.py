@@ -60,6 +60,9 @@ from actweave_knowledge import (
     KnowledgeSegmentView,
     KnowledgeTaskProgress,
 )
+from actweave_knowledge import (
+    KnowledgeBaseReparseRequest as KnowledgeBaseReparseContract,
+)
 from actweave_knowledge.extraction.contracts import ParseWarning, ProcessingProfile
 from actweave_knowledge.ingestion.profiles import FileCapabilities, ProcessingParameters
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -372,6 +375,9 @@ class KnowledgeBaseItemResponse(_StrictModel):
     default_top_k: int
     default_score_threshold: float
     default_relative_cutoff: float | None
+    # Base-wide chunking mode shared by every document; null while the base
+    # holds no live document (the next upload determines it).
+    chunking_mode: Literal["general", "parent_child"] | None
     delete_error: str | None
     created_at: datetime
     updated_at: datetime
@@ -765,6 +771,28 @@ class KnowledgeDocumentReparseRequest(_StrictModel):
         return self
 
 
+class KnowledgeBaseReparseRequest(_StrictModel):
+    """Base-wide re-parse with one parameter set; the only way to switch the base's chunking mode."""
+
+    processing_profile: ProcessingParameters | None = None
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    chunk_separator: str = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
+    remove_extra_spaces: bool = False
+    remove_urls_emails: bool = False
+    chunking_mode: Literal["general", "parent_child"] = "general"
+    child_chunk_size: int = 500
+    child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+
+    @model_validator(mode="after")
+    def check_processing_parameters(self):
+        try:
+            processing_parameters(self.model_dump(include=self.model_fields_set & _LEGACY_PROCESSING_FIELDS.keys()), self.processing_profile)
+        except KnowledgeError:
+            raise ValueError("conflicting processing parameters") from None
+        return self
+
+
 class KnowledgeReparsePreviewResponse(_StrictModel):
     document_version: int
     items: list[KnowledgeChunkPreviewItemResponse]
@@ -1039,6 +1067,7 @@ def _base_response(view: KnowledgeBaseView) -> KnowledgeBaseItemResponse:
         default_top_k=view.default_top_k,
         default_score_threshold=view.default_score_threshold,
         default_relative_cutoff=view.default_relative_cutoff,
+        chunking_mode=view.chunking_mode,
         delete_error=view.delete_error,
         created_at=view.created_at,
         updated_at=view.updated_at,
@@ -1297,6 +1326,42 @@ async def rebuild_knowledge_base(
             context.project_id,
             base_id,
             embedding_model_id=body.embedding_model_id,
+            authority=_knowledge_edit_authority(context),
+        )
+    except KnowledgeError as error:
+        raise knowledge_http_exception(error, context.request_id) from None
+    return KnowledgeBaseRebuildResponse(
+        item=_base_response(result.base),
+        accepted_document_count=result.accepted_document_count,
+        skipped_document_ids=list(result.skipped_document_ids),
+        request_id=context.request_id,
+    )
+
+
+@project_router.post("/bases/{base_id}/reparse", response_model=KnowledgeBaseRebuildResponse)
+async def reparse_knowledge_base(
+    base_id: uuid.UUID,
+    body: KnowledgeBaseReparseRequest,
+    context: Annotated[ProjectContext, Depends(require_project_knowledge_edit)],
+    module: Annotated[KnowledgeModule, Depends(get_knowledge_module)],
+) -> KnowledgeBaseRebuildResponse:
+    """Re-parse every document with one parameter set; switches the base's chunking mode."""
+
+    try:
+        result = await module.reparse_knowledge_base(
+            context.project_id,
+            base_id,
+            KnowledgeBaseReparseContract(
+                processing_profile=processing_parameters(body.model_dump(include=body.model_fields_set & _LEGACY_PROCESSING_FIELDS.keys()), body.processing_profile) if body.processing_profile is not None else None,
+                chunk_size=body.chunk_size,
+                chunk_overlap=body.chunk_overlap,
+                chunk_separator=body.chunk_separator,
+                remove_extra_spaces=body.remove_extra_spaces,
+                remove_urls_emails=body.remove_urls_emails,
+                chunking_mode=body.chunking_mode,
+                child_chunk_size=body.child_chunk_size,
+                child_chunk_separator=body.child_chunk_separator,
+            ),
             authority=_knowledge_edit_authority(context),
         )
     except KnowledgeError as error:

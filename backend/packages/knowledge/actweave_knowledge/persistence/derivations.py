@@ -108,3 +108,21 @@ def document_count_expression(base_id_column: ColumnElement[Any]) -> ColumnEleme
     """Number of document rows currently attached to the knowledge base."""
 
     return select(func.count()).select_from(KnowledgeDocumentRow).where(KnowledgeDocumentRow.knowledge_base_id == base_id_column).scalar_subquery()
+
+
+def live_document_count_expression(base_id_column: ColumnElement[Any]) -> ColumnElement[int]:
+    """Attached documents not being deleted: the rows that hold the base's chunking mode.
+
+    While this is zero the base's stored ``chunking_mode`` is undetermined
+    again — the next upload fixes it — so views project it as ``NULL``.
+    """
+
+    return (
+        select(func.count())
+        .select_from(KnowledgeDocumentRow)
+        .where(
+            KnowledgeDocumentRow.knowledge_base_id == base_id_column,
+            KnowledgeDocumentRow.status != "deleting",
+        )
+        .scalar_subquery()
+    )

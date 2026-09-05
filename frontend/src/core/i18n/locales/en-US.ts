@@ -266,6 +266,21 @@ export const enUS: Translations = {
       rebuildConfirmDescription: (name) =>
         `This re-embeds every published document of "${name}" with the selected model. Segment text, manual edits, and enabled states are preserved; only vectors are regenerated. It does not read the original file or run the parser; attachment bindings and bytes remain unchanged. Documents are excluded from retrieval while they process, and embedding calls incur model cost.`,
       rebuildConfirm: "Re-embed",
+      chunkingModeSectionTitle: "Chunking mode",
+      chunkingModeHint:
+        "Every document in a base shares one chunking mode. The first upload fixes it; later uploads and per-document reparses keep it. Switching re-parses every document with new settings.",
+      chunkingModeUndetermined:
+        "Not set yet; the first uploaded document determines it.",
+      switchChunkingModeButton: "Switch chunking mode",
+      reparseBaseTitle: "Re-parse all documents",
+      reparseBaseDescription: (name, count) =>
+        `Re-parses all ${count} ${count === 1 ? "document" : "documents"} of "${name}" from their original files with the settings below and replaces every segment. Each document's own chunk settings, manual segment edits, and per-segment disables are overwritten; published attachment bindings are replaced by the new parse. Re-embedding incurs model cost, and these documents are not searchable while they process.`,
+      reparseBaseBlockedHint:
+        "Every document must be ready or failed; the request is refused while any document is still processing.",
+      reparseBaseSubmit: "Re-parse all",
+      reparseBasePending: "Submitting…",
+      reparseBaseOutcome: (count) =>
+        `Re-parsing accepted for ${count} ${count === 1 ? "document" : "documents"}; they are excluded from retrieval while they process.`,
     },
     wizard: {
       uploadExistingTitle: "Upload documents",
@@ -311,7 +326,7 @@ export const enUS: Translations = {
       saveAndProcess: "Save & process",
       chunkSectionTitle: "Chunk settings",
       knowledgeTokenUnit:
-        "New documents use Knowledge Tokens, a fixed local chunking unit that is separate from model billing tokens.",
+        "Knowledge Tokens are a fixed local chunking unit, not the input tokens of the selected Embedding model. Chunk previews do not validate model input limits; configure chunking according to the selected model and service limits.",
       chunkSizeTokenLabel: "Chunk size (Knowledge Tokens)",
       chunkOverlapTokenLabel: "Chunk overlap (Knowledge Tokens)",
       childChunkSizeTokenLabel: "Child chunk size (Knowledge Tokens)",
@@ -427,7 +442,7 @@ export const enUS: Translations = {
       chunkSizeHint: "Allowed range: 200-4000 characters.",
       chunkOverlapLabel: "Chunk overlap (characters)",
       chunkOverlapHint:
-        "Allowed range: 0-500 characters, smaller than the chunk size.",
+        "Retains at most the configured number of body-text Knowledge Tokens. Overlap does not cross page, heading, or table boundaries and may be smaller.",
       chunkSeparatorLabel: "Delimiter",
       chunkSeparatorHint:
         "Preferred split boundary; \\n stands for a line break (default \\n\\n).",
@@ -447,6 +462,10 @@ export const enUS: Translations = {
       removeUrlsEmailsLabel: "Delete all URLs and email addresses",
       chunkImmutableNote:
         "Chunk settings cannot be changed after upload; retry reuses the original settings.",
+      chunkingModeLockedNote: (mode) =>
+        `This base's chunking mode is locked to ${mode} and applies to every document. Switch it from the base settings with a base-wide re-parse.`,
+      chunkingModeMismatch:
+        "Differs from the base's chunking mode; re-parse this document",
       upload: "Upload",
       uploading: "Uploading…",
       uploadingProgress: (done, total) => `Uploading… (${done}/${total})`,

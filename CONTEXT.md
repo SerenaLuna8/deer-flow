@@ -107,8 +107,16 @@ _Avoid_: Backup, lifecycle archive
 ## Knowledge assets
 
 **Knowledge Base**:
-A Project-shared collection of Knowledge Documents. An empty Knowledge Base may start unconfigured, with no embedding Provider Model. Before its first document upload, it binds one embedding Provider Model for indexing and search and optionally one reranker Provider Model for result ordering. Unconfigured empty bases do not participate in retrieval.
+A Project-shared collection of Knowledge Documents. An empty Knowledge Base may start unconfigured, with no embedding Provider Model. Before its first document upload, it binds one embedding Provider Model for indexing and search and optionally one reranker Provider Model for result ordering. Its first admitted document also fixes one Chunking Mode shared by every document. Unconfigured empty bases do not participate in retrieval.
 _Avoid_: Dataset, vector table
+
+**Chunking Mode**:
+The base-wide choice between general Knowledge Segments and parent-child Segments (Segment Children carry the vectors). It is fixed by the first document admitted into a Knowledge Base, required of every later upload and per-document reparse, and undetermined again only while the base holds no live document. Switching a populated base is the Base-wide Reparse.
+_Avoid_: per-document mode, dataset doc_form
+
+**Base-wide Reparse**:
+The explicit re-parse of every Knowledge Document of one Knowledge Base with a single confirmed parameter set; the only operation that changes a populated base's Chunking Mode. It admits all settled documents in one transaction or nothing, replacing each document's own chunk parameters when its new content publishes.
+_Avoid_: rebuild, re-embed, per-document reparse
 
 **Knowledge Document**:
 A source file uploaded to one Knowledge Base. It owns the stored file location, processing status, metadata values, segments, and embeddings.

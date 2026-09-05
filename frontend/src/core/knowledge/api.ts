@@ -31,6 +31,7 @@ import {
   type KnowledgeBaseItem,
   type KnowledgeBaseListResponse,
   type KnowledgeBaseRebuildResponse,
+  type KnowledgeBaseReparseInput,
   type KnowledgeChunkPreviewResponse,
   type KnowledgeDocumentItem,
   type KnowledgeDocumentAttachmentListResponse,
@@ -803,6 +804,24 @@ export async function rebuildKnowledgeBase(
   const response = await requestKnowledge(
     `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/rebuild`,
     jsonRequestInit("POST", { embedding_model_id: embeddingModelId }, signal),
+  );
+  return readKnowledgeResponse(response, knowledgeBaseRebuildResponseSchema);
+}
+
+/**
+ * Base-wide re-parse with one parameter set; switches the base's chunking
+ * mode. Shares the rebuild admission shape (skipped ids stay empty: the
+ * server admits every settled document or rejects the whole request).
+ */
+export async function reparseKnowledgeBase(
+  projectId: string,
+  baseId: string,
+  input: KnowledgeBaseReparseInput,
+  signal?: AbortSignal,
+): Promise<KnowledgeBaseRebuildResponse> {
+  const response = await requestKnowledge(
+    `${knowledgeBaseURL(projectId)}/bases/${encodeURIComponent(baseId)}/reparse`,
+    jsonRequestInit("POST", input, signal),
   );
   return readKnowledgeResponse(response, knowledgeBaseRebuildResponseSchema);
 }

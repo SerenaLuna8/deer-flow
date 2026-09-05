@@ -5,12 +5,19 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from html.entities import html5
+from string import punctuation
 
 from markdown_it import MarkdownIt
 
 from actweave_knowledge.extraction.contracts import AttachmentOccurrence, Document, SourceSpan
 
-from .source_mapping import clip_attachments, clip_source_spans, shift_source_spans
+from .index_text import build_index_text
+from .source_mapping import clip_attachments, clip_source_spans, edit_document, shift_source_spans
+
+_MARKDOWN_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+_FRAGMENT_BLOCK_MARKER = re.compile(r"[ \t\n]*(?P<marker>[-+*](?=[ \t\n]|$)|[0-9]{1,9}[.)](?=[ \t\n]|$)|#{1,6}(?=[ \t\n]|$)|>|(?:[-*_][ \t]*){3,}(?=\n|$)|~{3,})")
+_FRAGMENT_INDENT = re.compile(r" {4}| {0,3}\t")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +32,25 @@ class StructureUnit:
 
 def slice_unit(unit: StructureUnit, start: int, end: int) -> StructureUnit:
     return replace(unit, content=unit.content[start:end], source_spans=clip_source_spans(unit.source_spans, start, end), attachments=clip_attachments(unit.attachments, start, end))
+
+
+def slice_fragment(unit: StructureUnit, start: int, end: int) -> StructureUnit:
+    """Keep an ordinary slice's new block start literal before measuring it."""
+    fragment = slice_unit(unit, start, end)
+    if not start or not fragment.content or unit.kind not in {"paragraph", "markdown", "page", "text_fragment"}:
+        return fragment
+    edits = []
+    if _FRAGMENT_INDENT.match(unit.content, start):
+        edits.append((0, 1, "&#9;" if fragment.content[0] == "\t" else "&#32;"))
+    if match := _FRAGMENT_BLOCK_MARKER.match(unit.content, start):
+        marker = match["marker"]
+        offset = match.start("marker") - start + (len(marker) - 1 if marker[0].isdigit() else 0)
+        if offset < len(fragment.content):
+            edits.append((offset, offset, "\\"))
+    if not edits:
+        return fragment
+    protected = edit_document(Document(page_content=fragment.content, source_spans=fragment.source_spans, attachments=fragment.attachments), edits)
+    return replace(fragment, content=protected.page_content, source_spans=protected.source_spans, attachments=protected.attachments)
 
 
 def trim_unit(unit: StructureUnit) -> StructureUnit:
@@ -59,11 +85,22 @@ def context_unit(unit: StructureUnit) -> StructureUnit:
     return replace(unit, source_spans=shift_source_spans(unit.source_spans, 0, context=True), attachments=())
 
 
-def inline_atoms(text: str) -> list[tuple[int, int]]:
+def inline_atoms(text: str, *, include_text_escapes: bool = False) -> list[tuple[int, int]]:
     """Protect code spans, links and images, including balanced destinations."""
     ranges = []
     index = 0
     while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in punctuation:
+            if include_text_escapes:
+                ranges.append((index, index + 2))
+            index += 2
+            continue
+        if include_text_escapes and text[index] == "&":
+            entity = _MARKDOWN_ENTITY.match(text, index)
+            if entity and (entity[0].startswith("&#") or entity[0][1:] in html5):
+                ranges.append((index, entity.end()))
+                index = entity.end()
+                continue
         if text[index] == "`":
             stop = index + 1
             while stop < len(text) and text[stop] == "`":
@@ -114,6 +151,8 @@ def block_units(document: Document) -> list[StructureUnit]:
         if start > consumed and document.page_content[consumed:start].strip():
             result.append(trim_unit(slice_unit(full, consumed, start)))
         kind = {"heading_open": "heading", "table_open": "table", "fence": "code", "code_block": "indented_code", "bullet_list_open": "list", "ordered_list_open": "list"}.get(token.type, document.kind)
+        if token.type == "paragraph_open" and document.kind not in {"table_header", "table_row", "fields"}:
+            kind = "paragraph"
         unit = trim_unit(replace(slice_unit(full, start, end), kind=kind))
         if kind == "list" and any(span.role == "context_prefix" for span in unit.source_spans) and re.match(r"-\s+[^:：\n]+[:：]", unit.content):
             unit = replace(unit, kind="fields")
@@ -147,7 +186,13 @@ def structure_groups(documents: tuple[Document, ...]) -> Iterator[tuple[Structur
     table_headers: dict[tuple[object, ...], StructureUnit] = {}
     tables_with_rows = {table_identity(doc) for doc in documents if doc.kind == "table_row"}
     for document in documents:
-        units = block_units(document)
+        if document.kind == "title" and document.heading_path:
+            # The adapter's Title stays literal; only its context gets a
+            # heading marker, with the original serialized text and source.
+            title = StructureUnit(document.page_content, document.source_spans, document.heading_path, "heading", document.attachments)
+            units = [replace(join_units([StructureUnit("#" * min(len(document.heading_path), 6) + " "), title], ""), kind="heading")]
+        else:
+            units = block_units(document)
         page = tuple(sorted({s.location["page"] for s in document.source_spans if "page" in s.location}))
         own_boundary = (document.heading_path, page)
         is_row = document.kind in {"table_header", "table_row"}
@@ -187,6 +232,10 @@ def structure_groups(documents: tuple[Document, ...]) -> Iterator[tuple[Structur
                     yield StructureUnit(""), [prefix], "\n\n"
                 match = re.match(r"^(#{1,6})\s+(.*?)(?:\s+#+)?$", unit.content)
                 title = match[2] if match else unit.content.splitlines()[0]
+                if unit_index == 0 and document.heading_path:
+                    raw_leaf = document.heading_path[-1]
+                    if document.kind == "title" or title == raw_leaf or build_index_text(title) == raw_leaf:
+                        title = raw_leaf
                 level = _heading_level(unit)
                 # P1 paths contain titles only, with no gaps for skipped hN
                 # levels. The first heading is already the section path's leaf.

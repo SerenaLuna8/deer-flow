@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from ..base import BaseExtractor
 from ..contracts import Document, ExtractionContext, ExtractionError, ExtractSetting, ParseWarning, SourceSpan
 from ..encoding import read_source_bytes
+from ..literal import escape_literal_text
 from ..normalizer import external_image_placeholder
 
 _ACTIVE = {"script", "style", "iframe", "object", "embed", "template", "noscript", "svg", "math"}
@@ -25,8 +26,12 @@ _CONTAINERS = {"html", "body", "main", "article", "section", "div", "header", "f
 Parts = list[tuple[str, bool]]
 
 
-def _literal(text: str) -> str:
-    return re.sub(r"([\\`*_\[\]!])", r"\\\1", re.sub(r"\s+", " ", text))
+def _literal(text: str, *, escape_pipes: bool = True) -> str:
+    return escape_literal_text(
+        re.sub(r"\s+", " ", text),
+        protect_indentation=False,
+        escape_pipes=escape_pipes,
+    )
 
 
 def _safe_link(href: str) -> str | None:
@@ -43,11 +48,11 @@ def _safe_link(href: str) -> str | None:
     return quote(href, safe=":/?#[]@!$&'*+,;=%~.-_")
 
 
-def _inline(node) -> Parts:
+def _inline(node, *, table_cell: bool = False) -> Parts:
     if isinstance(node, Comment):
         return []
     if isinstance(node, NavigableString):
-        return [(_literal(str(node)), False)]
+        return [(_literal(str(node), escape_pipes=not table_cell), False)]
     if not isinstance(node, Tag) or node.name in _ACTIVE:
         return []
     if node.name == "img":
@@ -62,9 +67,9 @@ def _inline(node) -> Parts:
     # Inline edge spaces belong to adjacent siblings. Only actual block
     # descendants need the trimming/separation performed by block flow.
     if any(_structural(child) for child in node.children):
-        parts = _flow_parts(node)
+        parts = _flow_parts(node, table_cell=table_cell)
     else:
-        parts = [part for child in node.children for part in _inline(child)]
+        parts = [part for child in node.children for part in _inline(child, table_cell=table_cell)]
     if node.name == "a":
         target = _safe_link(str(node.get("href", "")))
         return [("[", False), *parts, (f"](<{target}>)", False)] if target else parts
@@ -90,7 +95,7 @@ def _structural(node) -> bool:
     return isinstance(node, Tag) and (node.name in _BLOCKS or node.name in _CONTAINERS or node.find(_BLOCKS) is not None)
 
 
-def _flow_chunks(container):
+def _flow_chunks(container, *, table_cell: bool = False):
     pending: Parts = []
     for child in container.children:
         if _structural(child):
@@ -98,19 +103,19 @@ def _flow_chunks(container):
             if pending:
                 yield "paragraph", pending
             pending = []
-            parts = _block_parts(child)
+            parts = _block_parts(child, table_cell=table_cell)
             if parts:
                 yield child.name, parts
         else:
-            pending.extend(_inline(child))
+            pending.extend(_inline(child, table_cell=table_cell))
     pending = _trim(pending)
     if pending:
         yield "paragraph", pending
 
 
-def _flow_parts(container) -> Parts:
+def _flow_parts(container, *, table_cell: bool = False) -> Parts:
     parts: Parts = []
-    for kind, chunk in _flow_chunks(container):
+    for kind, chunk in _flow_chunks(container, table_cell=table_cell):
         if parts:
             parts.append(("\n" if kind in {"ol", "ul"} else "\n\n", False))
         parts.extend(chunk)
@@ -138,25 +143,25 @@ def _prefix_lines(parts: Parts, first: str, rest: str) -> Parts:
     return output
 
 
-def _block_parts(node: Tag) -> Parts:
+def _block_parts(node: Tag, *, table_cell: bool = False) -> Parts:
     if node.name == "pre":
         text = node.get_text().replace("\r\n", "\n").replace("\r", "\n")
         fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
         return [(f"{fence}\n{text}" + ("" if text.endswith("\n") else "\n") + fence, False)]
     if node.name in {"ol", "ul"}:
-        return _list(node)
+        return _list(node, table_cell=table_cell)
     if node.name == "table":
         return _table(node)
     if node.name == "blockquote":
-        return _prefix_lines(_flow_parts(node), "> ", "> ")
+        return _prefix_lines(_flow_parts(node, table_cell=table_cell), "> ", "> ")
     if node.name == "hr":
         return [("---", False)]
     if re.fullmatch(r"h[1-6]", node.name):
-        return [("#" * int(node.name[1]) + " ", False), *_flow_parts(node)]
-    return _flow_parts(node)
+        return [("#" * int(node.name[1]) + " ", False), *_flow_parts(node, table_cell=table_cell)]
+    return _flow_parts(node, table_cell=table_cell)
 
 
-def _list(node: Tag) -> Parts:
+def _list(node: Tag, *, table_cell: bool = False) -> Parts:
     parts: Parts = []
     try:
         number = int(node.get("start", 1))
@@ -166,7 +171,7 @@ def _list(node: Tag) -> Parts:
         if parts:
             parts.append(("\n", False))
         marker = f"{number}. " if node.name == "ol" else "- "
-        parts.extend(_prefix_lines(_flow_parts(item), marker, " " * len(marker)))
+        parts.extend(_prefix_lines(_flow_parts(item, table_cell=table_cell), marker, " " * len(marker)))
         number += 1
     return parts
 
@@ -184,7 +189,7 @@ def _table(node: Tag) -> Parts:
         for position, cell in enumerate(cells):
             if position:
                 parts.append((" | ", False))
-            parts.extend((text.replace("|", "\\|").replace("\n", " "), synthetic) for text, synthetic in _trim(_inline(cell)))
+            parts.extend((text.replace("|", "\\|").replace("\n", " "), synthetic) for text, synthetic in _trim(_inline(cell, table_cell=True)))
         parts.append((" |", False))
         if index == 0:
             parts.append(("\n| " + " | ".join("---" for _ in cells) + " |", False))

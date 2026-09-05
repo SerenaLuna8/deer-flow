@@ -24,6 +24,8 @@ _EXCESS_NEWLINES = re.compile(r"\n{3,}")
 # the newline rule above. The class covers ASCII plus common Unicode spaces.
 _HORIZONTAL_WHITESPACE_RUNS = re.compile(r"[\t\f\v\x20\u00a0\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]{2,}")
 _EMAIL = re.compile(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+")
+_MARKDOWN_EMAIL = re.compile(r"(?:[A-Za-z0-9]|\\?[_.+-])+@(?:[A-Za-z0-9]|\\?-)+\\?\.(?:[A-Za-z0-9]|\\?[.-])+")
+_MARKDOWN_WHITESPACE_RUNS = re.compile(r"(?:[\t\f\v\x20\u00a0\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]|(?<!\\)&#(?:32|9);){2,}")
 # Printable ASCII only (not \S): in Chinese text a URL is usually followed by
 # CJK characters without whitespace, and \S+ would swallow them too.
 _URL = re.compile(r"https?://[!-~]+")
@@ -99,9 +101,9 @@ def clean_documents(documents: tuple[Document, ...], *, remove_extra_spaces: boo
                 ]
         patterns = []
         if remove_urls_emails:
-            patterns.extend([(_EMAIL, ""), (_URL, "")])
+            patterns.extend([(_MARKDOWN_EMAIL, ""), (_URL, "")])
         if remove_extra_spaces:
-            patterns.extend([(_EXCESS_NEWLINES, "\n\n"), (_HORIZONTAL_WHITESPACE_RUNS, " ")])
+            patterns.extend([(_EXCESS_NEWLINES, "\n\n"), (_MARKDOWN_WHITESPACE_RUNS, " ")])
         current = document
         for pattern, replacement in patterns:
             edits = [(m.start(), m.end(), replacement) for m in pattern.finditer(current.page_content) if not any(start < m.end() and end > m.start() for start, end in protected)]

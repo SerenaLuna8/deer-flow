@@ -34,7 +34,7 @@ _COMMENT_STATEMENTS_DIGEST_PREFIX = "-- Comment statements SHA-256: "
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 113
-_EXPECTED_COLUMN_COUNT = 1449
+_EXPECTED_COLUMN_COUNT = 1450
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -564,6 +564,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("knowledge_bases", "default_top_k"): "检索未显式传参时使用的默认返回条数",
     ("knowledge_bases", "default_score_threshold"): "检索未显式传参时使用的默认相关性分数阈值（0 表示不过滤）",
     ("knowledge_bases", "default_relative_cutoff"): "可选的相对分数截断：低于本库最高原生分数该比例的候选被淘汰；空表示不启用",
+    ("knowledge_bases", "chunking_mode"): "库级分段模式（general 或 parent_child）：由首个文档确定，后续上传与单文档重新解析必须一致，仅整库重新解析可切换；尚无文档时为空",
     ("knowledge_bases", "summary_index_enabled"): "是否启用片段摘要索引；开启为已发布文档排队摘要回填，关闭仅将摘要移出召回而不删除已生成行",
     ("knowledge_documents", "knowledge_base_id"): "所属知识库标识",
     ("knowledge_documents", "name"): "用户看到的文档名称",

@@ -390,17 +390,22 @@ tests; patch a façade only where the façade itself still calls the seam.
   when missing. Preview and ingestion share one extract/clean/split/index path;
   chunk parameters freeze on the Document at upload, and publication atomically
   replaces Segment, Child, Attachment, profile, and Extraction state under a
-  version check. The token splitter (`splitter-v2`) caps a Segment at
-  `KNOWLEDGE_MAX_SEGMENT_CHARS` (16000) characters, falls back through
-  paragraph, line, sentence-final (`。！？.!?`), clause (`；，`), word, and
-  character boundaries, and degrades an over-budget context prefix (outer
-  heading levels first, then truncation, after emitting any source heading or
-  header text in full) with `CONTEXT_PREFIX_TRUNCATED` /
-  `OVERSIZED_PREFIX_SPLIT` warnings instead of failing the document. The
-  frozen character profile keeps its original algorithm and fallback list.
+  version check. The token splitter (`splitter-v3`) retains bounded ordinary-body
+  suffix overlap within the existing page/heading group, including PDF page
+  prose and oversized text fragments; it never overlaps code, table records, or
+  image occurrences, and overlap is a maximum that may be smaller. Display and
+  index Token budgets and the `KNOWLEDGE_MAX_SEGMENT_CHARS` (16000) ceiling
+  remain independent checks. Direct token re-splitting rejects unsupported
+  frozen splitter or cleaner versions; publication and re-embedding do not
+  implicitly reparse. The frozen character profile keeps its original algorithm
+  and fallback list.
 - Published `content` is the Markdown shown to users and Agents; embedding,
   lexical indexing, reranking, and summaries use the persisted `index_text`,
   and an empty `index_text` on a token profile fails closed.
+- Literal serialization and Word explicit outline handling belong to extraction;
+  `adapter-v2` and the verified platform resource lock ship together. Token
+  `cleaner-v2` recognizes the literal serializer's escaped email punctuation and
+  whitespace entities; the retained character cleaner remains unchanged.
 - Index-text and source-attribution parsers have independent, precompiled,
   immutable rule configurations. Prefix Token counters belong to one packing
   group, separately for display and index text; reuse only proven boundaries
@@ -436,6 +441,17 @@ tests; patch a façade only where the façade itself still calls the seam.
   Document into failed. Attachment reads validate the exact database binding
   before and after bounded object I/O and return only image bytes with
   `private, no-store` and `nosniff`.
+- The chunking mode is a base invariant (`knowledge_bases.chunking_mode`):
+  under the base lock the first live document fixes it, later uploads,
+  per-document reparse/preview, and failed-ingest retries must match it, and
+  the view projects `null` while no live document holds it (an emptied base is
+  determined again by its next upload). Only `POST /bases/{base_id}/reparse`
+  switches it: one parameter set, profiles resolved per file extension outside
+  the transaction, then base-first locking, an all-or-nothing gate (any
+  in-flight document or open indexing task refuses everything), the mode
+  switch, and one frozen `ingest_document` reparse task per document in the
+  same transaction. Retrieval keeps recalling both modes so a transitional
+  mix never fails a search.
 - The `knowledge_*` tables plus the settings singleton are ordinary Schema V1
   members, and `public.vector` (pgvector) must exist before install.
 - Knowledge tests live under `backend/tests/knowledge/` and require the

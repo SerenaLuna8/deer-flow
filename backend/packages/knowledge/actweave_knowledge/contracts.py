@@ -292,6 +292,11 @@ class KnowledgeBaseView:
     # Fraction (0, 1] of the base's best native score below which candidates
     # drop when a search omits ``relative_score_cutoff``; ``None`` disables.
     default_relative_cutoff: float | None = None
+    # The chunking mode every document of this base shares. Fixed by the
+    # first admitted document; ``None`` while the base holds no live document,
+    # so the next upload determines it again. Switching a populated base is
+    # the explicit base-wide reparse, never a per-document choice.
+    chunking_mode: KnowledgeChunkingMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +305,9 @@ class KnowledgeRebuildResult:
 
     ``skipped_document_ids`` lists never-published failed documents that stay
     failed: re-embedding has no published content to read, and reparsing the
-    original file must remain an explicit, separate decision.
+    original file must remain an explicit, separate decision. The base-wide
+    reparse reuses this shape with an always-empty ``skipped_document_ids``:
+    it admits every document or nothing.
     """
 
     base: KnowledgeBaseView
@@ -799,6 +806,29 @@ class KnowledgeReparseRequest:
     child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
     processing_profile: ProcessingParameters | None = None
     expected_preview_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBaseReparseRequest:
+    """Base-wide re-parse of every document with one confirmed parameter set.
+
+    This is the only operation that may change a populated base's chunking
+    mode. It is all-or-nothing: with any document still in flight (or holding
+    an open indexing task) nothing is admitted, because a document publishing
+    under the previous mode after the switch would break the base's invariant.
+    Every document's own stored parameters are replaced by this set when its
+    new content publishes.
+    """
+
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    chunk_separator: str = KNOWLEDGE_DEFAULT_CHUNK_SEPARATOR
+    remove_extra_spaces: bool = False
+    remove_urls_emails: bool = False
+    chunking_mode: KnowledgeChunkingMode = "general"
+    child_chunk_size: int = 500
+    child_chunk_separator: str = KNOWLEDGE_DEFAULT_CHILD_CHUNK_SEPARATOR
+    processing_profile: ProcessingParameters | None = None
 
 
 @dataclass(frozen=True, slots=True)

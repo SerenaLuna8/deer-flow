@@ -352,10 +352,12 @@ async def test_upload_freezes_parent_child_mode_and_normalizes_general_child_par
         assert nested.child_chunk_separator == "。"
         assert nested.hit_count == 0
 
-        # General mode ignores whatever child values the client sent.
+        # General mode ignores whatever child values the client sent. The
+        # mode itself is a base invariant, so this lands in its own base.
+        general_project_id, general_base_id = await _seed_base(harness)
         plain = await harness.service.upload_document(
-            project_id,
-            base_id,
+            general_project_id,
+            general_base_id,
             _upload(tmp_path, name="普通文档", chunking_mode="general", child_chunk_size=1999, child_chunk_separator="；"),
         )
         assert plain.chunking_mode == "general"

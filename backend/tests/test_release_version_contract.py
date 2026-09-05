@@ -44,15 +44,6 @@ def test_runtime_product_metadata_uses_the_v1_release_version() -> None:
     )
 
 
-def test_public_release_copy_describes_fluva_v1_without_v2_residue() -> None:
-    hero = (REPO_ROOT / "frontend/src/components/landing/hero.tsx").read_text(encoding="utf-8")
-    whats_new = (REPO_ROOT / "frontend/src/components/landing/sections/whats-new-section.tsx").read_text(encoding="utf-8")
-
-    assert "Get Started with Fluva 1.0" in hero
-    assert "Meet Fluva 1.0" in whats_new
-    assert "Fluva 2.0" not in hero + whats_new
-
-
 def test_frontend_source_has_no_legacy_product_copy() -> None:
     frontend_root = REPO_ROOT / "frontend"
     source_paths = [frontend_root / "README.md"]

@@ -240,16 +240,29 @@ export function KnowledgeCreateWizard({
   const [retrievalMode, setRetrievalMode] = useState<KnowledgeRetrievalMode>(
     existingBase?.retrieval_mode ?? "semantic",
   );
+  // A populated base fixes the chunking mode for every later upload; the
+  // draft starts on it and the cards render it locked.
+  const lockedChunkingMode = existingBase?.chunking_mode ?? null;
   const [chunkDraft, setChunkDraft] = useState<KnowledgeChunkSettingsDraft>({
     chunkSize: "1000",
     chunkOverlap: "100",
     chunkSeparator: DEFAULT_CHUNK_SEPARATOR,
-    chunkingMode: "general",
+    chunkingMode: lockedChunkingMode ?? "general",
     childChunkSize: "500",
     childChunkSeparator: DEFAULT_CHILD_CHUNK_SEPARATOR,
     removeExtraSpaces: false,
     removeUrlsEmails: false,
   });
+  // The polled base may lock (or switch) while the wizard is open; the
+  // submission must never carry a mode the base no longer admits.
+  useEffect(() => {
+    if (lockedChunkingMode === null) return;
+    setChunkDraft((current) =>
+      current.chunkingMode === lockedChunkingMode
+        ? current
+        : { ...current, chunkingMode: lockedChunkingMode },
+    );
+  }, [lockedChunkingMode]);
   const {
     chunkSize,
     chunkOverlap,
@@ -997,6 +1010,7 @@ export function KnowledgeCreateWizard({
                   disabled={isSubmitting}
                   limits={chunkLimits}
                   radioName="chunking-mode"
+                  lockedMode={lockedChunkingMode}
                 />
               </div>
               {modelsLocked ? (

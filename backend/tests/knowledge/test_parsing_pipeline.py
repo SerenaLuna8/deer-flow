@@ -9,12 +9,15 @@ from pathlib import Path
 import pytest
 from actweave_knowledge import KNOWLEDGE_QUOTA_EXCEEDED, KnowledgeError
 from actweave_knowledge.extraction.contracts import ProcessingProfile
+from actweave_knowledge.ingestion import PREVIEW_CHUNK_LIMIT
 from actweave_knowledge.ingestion import pipeline as pipeline_module
+from actweave_knowledge.ingestion.tokenizer import count_knowledge_tokens
 from actweave_knowledge.persistence.models import (
     KnowledgeAttachmentRow,
     KnowledgeBaseRow,
     KnowledgeDocumentRow,
     KnowledgeExtractionRow,
+    KnowledgeSegmentChildRow,
     KnowledgeSegmentRow,
 )
 from extraction_test_helpers import extraction_harness
@@ -24,6 +27,58 @@ from sqlalchemy import event, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["general", "parent_child"])
+async def test_long_prose_overlap_preview_matches_published_derivations(
+    postgres_database_url: str,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Preview and the published ingestion result share the token-overlap derivation."""
+
+    source = tmp_path / "overlap.md"
+    source.write_text(" ".join(f"word{index}" for index in range(350)), encoding="utf-8")
+    profile = ProcessingProfile(
+        parse=make_parse_profile(".md"),
+        chunk=make_chunk_profile(mode=mode, size=200, overlap=60, child_size=100),
+    )
+    async with ingestion_harness(postgres_database_url) as harness:
+        preview = await harness.preview(source, profile)
+        uploaded = await harness.upload(source, profile)
+        await harness.run_next_task()
+        rows = await harness.segments(uploaded.id)
+
+        assert len(rows) < PREVIEW_CHUNK_LIMIT
+        assert len(rows) == len(preview.chunks)
+        assert [row.content for row in rows] == [chunk.content for chunk in preview.chunks]
+        assert [row.source_spans for row in rows] == [[span.model_dump(mode="json") for span in chunk.source_spans] for chunk in preview.chunks]
+        assert [row.token_count for row in rows] == [chunk.token_count for chunk in preview.chunks]
+        assert all(row.index_text and row.token_count <= 200 for row in rows)
+        if mode == "general":
+            assert harness.fake_model.calls[-1] == [row.index_text for row in rows]
+        else:
+            async with harness.resources.session_factory() as session:
+                children = list(
+                    (
+                        await session.scalars(
+                            select(KnowledgeSegmentChildRow)
+                            .join(KnowledgeSegmentRow, KnowledgeSegmentRow.id == KnowledgeSegmentChildRow.knowledge_segment_id)
+                            .where(KnowledgeSegmentRow.knowledge_document_id == uploaded.id)
+                            .order_by(KnowledgeSegmentRow.position, KnowledgeSegmentChildRow.position)
+                        )
+                    ).all()
+                )
+            preview_children = [child_content for chunk in preview.chunks for child_content in chunk.child_contents]
+            assert [child.content for child in children] == preview_children
+            for parent, preview_chunk in zip(rows, preview.chunks, strict=True):
+                assert [child.content for child in children if child.knowledge_segment_id == parent.id] == list(preview_chunk.child_contents)
+            assert [child.index_text for child in children] == preview_children
+            assert [child.token_count for child in children] == [count_knowledge_tokens(content) for content in preview_children]
+            assert harness.fake_model.calls[-1] == [child.index_text for child in children]
+            assert all(row.embedding is None for row in rows)
+            assert all(child.token_count <= 100 for child in children)
 
 
 @pytest.mark.asyncio
@@ -126,6 +181,45 @@ async def test_embedding_failure_preserves_ready_cache_and_retry_hits_it(
         assert len(facts["extractions"]) == 1
         assert document.published_extraction_id == extraction.id
         assert source_gets == sum(operation == "get" and key == document.storage_key for operation, key in harness.resources.object_store.calls)
+
+
+@pytest.mark.asyncio
+async def test_literal_preview_cold_ingestion_and_cache_retry_are_identical(postgres_database_url, tmp_path):
+    from actweave_knowledge.ingestion.index_text import build_index_text
+
+    async with ingestion_harness(postgres_database_url) as harness:
+        source = tmp_path / "literal.txt"
+        raw = "---\n\n1. item &amp;\n\n    # literal"
+        source.write_text(raw, encoding="utf-8")
+        profile = ProcessingProfile(parse=make_parse_profile(".txt"), chunk=make_chunk_profile())
+        preview = await harness.preview(source, profile)
+        uploaded = await harness.upload(source, profile)
+        harness.fake_model.fail = True
+        await harness.run_next_task(expected_status="retry_wait")
+        facts = await harness.resources.read_rows()
+        doc = next(row for row in facts["documents"] if row.id == uploaded.id)
+        assert doc.published_extraction_id is None
+        assert len(facts["extractions"]) == 1 and facts["extractions"][0].state == "ready"
+        extraction_id = facts["extractions"][0].id
+        reads = sum(op == "get" and key == doc.storage_key for op, key in harness.resources.object_store.calls)
+
+        harness.fake_model.fail = False
+        await harness.run_next_task()
+        rows = await harness.segments(uploaded.id)
+        assert [row.content for row in rows] == [chunk.content for chunk in preview.chunks]
+        assert [row.index_text for row in rows] == [build_index_text(chunk.content) for chunk in preview.chunks]
+        assert [row.token_count for row in rows] == [chunk.token_count for chunk in preview.chunks]
+        assert [row.source_spans for row in rows] == [[span.model_dump(mode="json") for span in chunk.source_spans] for chunk in preview.chunks]
+        assert all(row.extraction_id == extraction_id for row in rows)
+        assert harness.fake_model.calls[-1] == [row.index_text for row in rows]
+        joined = "\n".join(row.index_text for row in rows)
+        assert all(value in joined for value in ("---", "1. item &amp;", "# literal"))
+        assert not preview.warnings
+        after = await harness.resources.read_rows()
+        current = next(row for row in after["documents"] if row.id == uploaded.id)
+        assert current.parse_warnings == []
+        assert len(after["extractions"]) == 1
+        assert reads == sum(op == "get" and key == doc.storage_key for op, key in harness.resources.object_store.calls)
 
 
 @pytest.mark.asyncio

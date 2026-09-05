@@ -77,6 +77,10 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
             "default_relative_cutoff IS NULL OR (default_relative_cutoff > 0 AND default_relative_cutoff <= 1)",
             name="ck_knowledge_bases_default_relative_cutoff",
         ),
+        CheckConstraint(
+            "chunking_mode IS NULL OR chunking_mode IN ('general', 'parent_child')",
+            name="ck_knowledge_bases_chunking_mode",
+        ),
         Index("uq_knowledge_bases_project_name", "project_id", text("lower(name)"), unique=True),
         Index("ix_knowledge_bases_project_status", "project_id", "status", text("updated_at DESC"), "id"),
         Index("ix_knowledge_bases_embedding_model", "embedding_model_id"),
@@ -111,6 +115,11 @@ class KnowledgeBaseRow(KnowledgeOrmBase):
     # best native score drop. Adapts to the embedding model's own cosine
     # distribution where one absolute threshold cannot; NULL disables it.
     default_relative_cutoff: Mapped[float | None] = mapped_column(Double, nullable=True)
+    # Base-wide chunking mode. The first admitted document fixes it and every
+    # later upload or per-document reparse must match; only a base-wide
+    # reparse switches it. NULL until a document is admitted, and treated as
+    # undetermined again once the base holds no live document.
+    chunking_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class KnowledgeDocumentRow(KnowledgeOrmBase):

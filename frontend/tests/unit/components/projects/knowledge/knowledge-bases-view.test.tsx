@@ -27,6 +27,7 @@ const base: KnowledgeBaseItem = {
   default_top_k: 5,
   default_score_threshold: 0,
   default_relative_cutoff: null,
+  chunking_mode: "general",
   delete_error: null,
   created_at: "2026-08-29T00:00:00Z",
   updated_at: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),

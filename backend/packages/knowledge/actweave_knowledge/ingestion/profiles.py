@@ -21,10 +21,10 @@ from .tokenizer import TOKENIZER_PROFILE_ID, count_knowledge_tokens, tokenizer_f
 
 NORMALIZATION_VERSION = "md-v1"
 IMAGE_POLICY_VERSION = "raster-v1"
-CLEANER_VERSION = "cleaner-v1"
+CLEANER_VERSION = "cleaner-v2"
 # v2: 16000-character ceiling, sentence-final ！？ and clause ；， fallback
 # boundaries, degraded (never failing) over-budget context prefixes.
-SPLITTER_VERSION = "splitter-v2"
+SPLITTER_VERSION = "splitter-v3"
 
 
 class ProcessingParameters(BaseModel):
